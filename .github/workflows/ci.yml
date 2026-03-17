@@ -1,0 +1,42 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Fast: check + test + clippy + fmt (~2 min)
+  ci:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: davidB/rust-cargo-make@v1
+      - run: cargo make ci
+
+  # CLI: build + smoke test (~2 min)
+  cli:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --features cli
+      - name: Smoke test CLI
+        run: |
+          echo "DEFINE TABLE user SCHEMAFULL;" > /tmp/test.surql
+          cargo run --features cli -- check /tmp/test.surql
+          cargo run --features cli -- schema /tmp/test.surql
+
+  # Docker: validate against real SurrealDB (~5-8 min)
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --features validate-docker

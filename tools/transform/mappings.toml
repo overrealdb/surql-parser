@@ -1,0 +1,77 @@
+# surql-transform mappings
+# Declarative rules for transforming SurrealDB source into standalone parser crate.
+# Add new mappings here when SurrealDB adds new internal module references.
+
+[import_rewrites]
+# source path prefix = replacement path prefix
+# Applied to all `use crate::X` and `crate::X::Y` paths in source files.
+#
+# Strategy: keep module names as-is (sql, syn) under upstream/.
+# Only remap crate:: paths to crate::upstream:: so they resolve.
+"crate::sql"                              = "crate::upstream::sql"
+"crate::syn"                              = "crate::upstream::syn"
+"crate::cnf"                              = "crate::config"
+"crate::types"                            = "crate::compat::types"
+"crate::dbs::Capabilities"                = "crate::compat::Capabilities"
+"crate::dbs::capabilities"                = "crate::compat::capabilities"
+"crate::dbs"                              = "crate::compat::dbs"
+"crate::err"                              = "crate::compat::err"
+"crate::catalog"                          = "crate::compat::catalog"
+"surrealdb_types::fmt_non_finite_f64"      = "crate::compat::fmt::fmt_non_finite_f64"
+"crate::fmt"                              = "crate::upstream::fmt"
+"crate::val"                              = "crate::compat::val"
+
+[remove]
+# Remove impl blocks where ANY method has a parameter matching these type fragments.
+# This strips execution-only code while preserving type definitions and Display impls.
+execution_params = [
+	"Context",
+	"Options",
+	"Transaction",
+	"CursorDoc",
+	"FrozenContext",
+]
+
+# Remove `From<sql::X> for expr::X` and reverse impl blocks.
+# These connect parser AST to execution layer — not needed standalone.
+cross_layer_from_impls = [
+	["sql", "expr"],
+	["expr", "sql"],
+]
+
+# Module prefixes to strip entirely.
+# Any `use crate::expr::*` import is removed.
+# Any impl block referencing these modules is removed.
+# These modules are engine-internal and not needed for standalone parsing.
+strip_modules = [
+	"crate::expr",
+	"crate::fnc",
+	"crate::ctx",
+	"crate::doc",
+	"crate::idx",
+	"crate::kvs",
+	"crate::exe",
+]
+
+# Remove entire modules matching these names (recursively).
+remove_modules = ["test"]
+
+# Remove items with these cfg attributes.
+remove_cfg = ["cfg(test)"]
+
+[attributes]
+# Remove these attributes entirely (they reference optional deps).
+# Key = attribute name fragment to match.
+remove_attrs = ["instrument"]
+
+# Wrap these attributes in cfg_attr for optional features.
+# key = attribute name, value = feature gate
+# NOTE: cfg_attr wrapping of instrument is tricky (nested #[]), so we just remove them.
+[attributes.cfg_wrap]
+
+[warnings]
+# Warn (don't fail) when encountering unknown crate:: paths not in import_rewrites.
+warn_unknown_imports = true
+
+# Fail (not just warn) on unknown imports. Set to true for strict mode.
+fail_on_unknown = false

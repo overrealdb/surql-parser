@@ -1,0 +1,103 @@
+[config]
+default_to_workspace = false
+
+# ─── Development ───
+
+[tasks.check]
+description = "Quick check (no tests)"
+command = "cargo"
+args = ["check"]
+
+[tasks.test]
+description = "Run all parser tests (fast, no DB)"
+command = "cargo"
+args = ["test"]
+
+[tasks.test-mem]
+description = "Run tests with in-memory SurrealDB validation"
+command = "cargo"
+args = ["test", "--features", "validate-mem"]
+
+[tasks.test-docker]
+description = "Run tests with Docker SurrealDB validation"
+command = "cargo"
+args = ["test", "--features", "validate-docker"]
+
+[tasks.test-all]
+description = "Run all test modes"
+dependencies = ["test", "test-docker"]
+
+# ─── Quality ───
+
+[tasks.clippy]
+description = "Run clippy linter"
+command = "cargo"
+args = ["clippy", "--", "-D", "warnings"]
+
+[tasks.fmt]
+description = "Format code"
+command = "cargo"
+args = ["fmt"]
+
+[tasks.fmt-check]
+description = "Check formatting"
+command = "cargo"
+args = ["fmt", "--check"]
+
+[tasks.audit]
+description = "Security audit (CVEs)"
+command = "cargo"
+args = ["audit"]
+
+[tasks.deny]
+description = "License and supply chain check"
+command = "cargo"
+args = ["deny", "check", "advisories", "licenses", "sources"]
+
+[tasks.lint]
+description = "All quality checks: clippy + fmt + deny"
+dependencies = ["clippy", "fmt-check", "deny"]
+
+# ─── CI (what GitHub Actions runs) ───
+
+[tasks.ci]
+description = "Full CI pipeline: check + test + lint"
+dependencies = ["check", "test", "clippy", "fmt-check"]
+
+[tasks.ci-full]
+description = "Full CI with Docker validation + security"
+dependencies = ["ci", "test-docker", "deny"]
+
+# ─── CLI ───
+
+[tasks.cli]
+description = "Build CLI tool"
+command = "cargo"
+args = ["build", "--features", "cli"]
+
+[tasks.cli-release]
+description = "Build CLI tool (release)"
+command = "cargo"
+args = ["build", "--release", "--features", "cli"]
+
+# ─── Sync ───
+
+[tasks.sync]
+description = "Sync parser from local SurrealDB clone"
+script = ["SURREALDB_LOCAL=${SURREALDB_LOCAL:-} ./scripts/sync-upstream.sh local"]
+
+[tasks.sync-main]
+description = "Sync parser from SurrealDB main branch"
+script = ["./scripts/sync-upstream.sh main"]
+
+# ─── Publish ───
+
+[tasks.publish-dry]
+description = "Dry-run publish to crates.io"
+command = "cargo"
+args = ["publish", "--dry-run"]
+
+[tasks.publish]
+description = "Publish to crates.io"
+command = "cargo"
+args = ["publish"]

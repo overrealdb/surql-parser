@@ -1,0 +1,76 @@
+[workspace]
+members = [".", "tools/transform"]
+
+[package]
+name = "surql-parser"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+description = "Standalone SurrealQL parser extracted from SurrealDB"
+repository = "https://github.com/overrealdb/surql-parser"
+keywords = ["surrealdb", "surrealql", "parser", "sql", "ast"]
+categories = ["parser-implementations", "database"]
+rust-version = "1.94"
+readme = "README.md"
+exclude = [
+    "tools/",
+    "scripts/",
+    "transforms/",
+    "tests/fixtures/",
+    ".github/",
+    "DIRTY_HACKS.md",
+    "UPSTREAM_HASH",
+    "UPSTREAM_VERSION",
+]
+
+[dependencies]
+anyhow = "1"
+reblessive = { version = "0.4", features = ["tree"] }
+surrealdb-types = "3.0"
+chrono = "0.4"
+geo = { version = "0.32", default-features = false }
+geo-types = "0.7"
+uuid = { version = "1", features = ["v4", "v7"] }
+rust_decimal = { version = "1", features = ["maths"] }
+regex = "1"
+revision = "0.10"
+serde = { version = "1", features = ["derive", "rc"] }
+tracing = "0.1"
+thiserror = "2"
+unicase = "2.9"
+phf = { version = "0.13", features = ["macros", "unicase"] }
+rand = "0.8"
+bytes = "1"
+argon2 = "0.5"
+jsonwebtoken = "9"
+storekey = "0.5"
+walkdir = { version = "2", optional = true }
+
+[[bin]]
+name = "surql"
+path = "src/bin/surql.rs"
+required-features = ["cli"]
+
+[features]
+default = []
+arbitrary = []    # placeholder for upstream cfg_attr(feature = "arbitrary", ...)
+surrealism = []   # placeholder for upstream cfg_attr(feature = "surrealism", ...)
+cli = ["dep:clap", "dep:walkdir"]
+# Validation modes (Layer 3 testing):
+# Validation features only activate dev-dependencies in tests — zero impact on library users.
+validate-mem = []      # in-memory SurrealDB (no Docker)
+validate-docker = []   # testcontainers SurrealDB (reliable)
+
+[dependencies.clap]
+version = "4"
+features = ["derive"]
+optional = true
+
+[dev-dependencies]
+pretty_assertions = "1"
+walkdir = "2"
+surrealdb = { version = "3", default-features = false, features = ["kv-mem"] }
+reqwest = { version = "0.12", features = ["json", "blocking"] }
+tokio = { version = "1", features = ["full"] }
+testcontainers = "0.23"
+testcontainers-modules = { version = "0.11", features = ["surrealdb"] }
