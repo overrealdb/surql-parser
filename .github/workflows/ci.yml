@@ -19,7 +19,7 @@ jobs:
     # On PRs: require maintainer approval via "ci" environment (skip for release-plz)
     environment: ${{ github.event_name == 'pull_request' && !startsWith(github.head_ref, 'release-plz-') && 'ci' || '' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - uses: davidB/rust-cargo-make@v1
@@ -30,7 +30,7 @@ jobs:
     runs-on: ubuntu-latest
     environment: ${{ github.event_name == 'pull_request' && !startsWith(github.head_ref, 'release-plz-') && 'ci' || '' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --features cli
@@ -45,7 +45,7 @@ jobs:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --features validate-docker
