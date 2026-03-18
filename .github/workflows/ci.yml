@@ -40,8 +40,9 @@ jobs:
           cargo run --features cli -- check /tmp/test.surql
           cargo run --features cli -- schema /tmp/test.surql
 
-  # Docker validation — only on main (not on fork PRs, saves minutes)
+  # Docker validation — only on main, after fast checks pass
   validate:
+    needs: [ci, cli]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
