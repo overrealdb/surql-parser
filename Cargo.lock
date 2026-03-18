@@ -3529,15 +3529,6 @@ dependencies = [
 
 [[package]]
 name = "revision"
-version = "0.10.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "22f53179a035f881adad8c4d58a2c599c6b4a8325b989c68d178d7a34d1b1e4c"
-dependencies = [
- "revision-derive 0.10.0",
-]
-
-[[package]]
-name = "revision"
 version = "0.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "11c3c8ec8b2be254beb5f8acdd80cdd57b7b5d40988c2ec3d0b7cdb6f7c2829b"
@@ -3546,21 +3537,10 @@ dependencies = [
  "chrono",
  "geo 0.31.0",
  "regex",
- "revision-derive 0.17.0",
+ "revision-derive",
  "roaring",
  "rust_decimal",
  "uuid",
-]
-
-[[package]]
-name = "revision-derive"
-version = "0.10.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5f0ec466e5d8dca9965eb6871879677bef5590cf7525ad96cae14376efb75073"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.117",
 ]
 
 [[package]]
@@ -4412,7 +4392,7 @@ dependencies = [
  "reblessive",
  "regex",
  "reqwest",
- "revision 0.10.0",
+ "revision",
  "rust_decimal",
  "serde",
  "storekey 0.5.0",
@@ -4545,7 +4525,7 @@ dependencies = [
  "rayon",
  "reblessive",
  "regex",
- "revision 0.17.0",
+ "revision",
  "ring",
  "roaring",
  "rust-stemmers",

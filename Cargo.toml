@@ -35,7 +35,7 @@ geo-types = "0.7"
 uuid = { version = "1", features = ["v4", "v7"] }
 rust_decimal = { version = "1", features = ["maths"] }
 regex = "1"
-revision = "0.10"
+revision = "0.17"
 serde = { version = "1", features = ["derive", "rc"] }
 tracing = "0.1"
 thiserror = "2"
