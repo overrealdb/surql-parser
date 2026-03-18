@@ -58,11 +58,24 @@ args = ["deny", "check", "advisories", "licenses", "sources"]
 description = "All quality checks: clippy + fmt + deny"
 dependencies = ["clippy", "fmt-check", "deny"]
 
+# ─── Coverage ───
+
+[tasks.coverage]
+clear = true
+description = "Generate code coverage report"
+command = "cargo"
+args = ["llvm-cov", "--lcov", "--output-path", "lcov.info"]
+
+[tasks.coverage-html]
+description = "Generate HTML coverage report"
+command = "cargo"
+args = ["llvm-cov", "--html"]
+
 # ─── CI (what GitHub Actions runs) ───
 
 [tasks.ci]
-description = "Full CI pipeline: check + test + lint"
-dependencies = ["check", "test", "clippy", "fmt-check"]
+description = "Full CI pipeline: check + test + clippy + fmt + coverage"
+dependencies = ["check", "test", "clippy", "fmt-check", "coverage"]
 env = { "RUSTFLAGS" = "-D warnings" }
 
 [tasks.ci-full]

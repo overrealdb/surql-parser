@@ -2,7 +2,7 @@ name: Security
 on:
   push:
     branches: [main]
-  # Only on main push, NOT on PRs (saves minutes, prevents secret exposure)
+  pull_request:
   schedule:
     - cron: "0 6 * * 1" # weekly Monday 6am UTC
 
@@ -10,6 +10,7 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # SCA: dependency audit (CVEs + licenses + supply chain)
   deny:
     runs-on: ubuntu-latest
     steps:
@@ -17,3 +18,30 @@ jobs:
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check advisories licenses sources
+
+  # Dependency review: block PRs that add vulnerable deps
+  # Requires: Settings > Code security > Dependency graph enabled
+  dependency-review:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/dependency-review-action@v4
+        with:
+          fail-on-severity: high
+
+  # Secret scanning: detect accidentally committed secrets
+  # Uses gitleaks CLI directly (free, no license needed for orgs)
+  gitleaks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Install gitleaks
+        run: |
+          GITLEAKS_VERSION=8.24.3
+          curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
+            | tar xz -C /usr/local/bin gitleaks
+      - name: Run gitleaks
+        run: gitleaks detect --source . --verbose

@@ -44,7 +44,7 @@ phf = { version = "0.13", features = ["macros", "unicase"] }
 rand = "0.8"
 bytes = "1"
 argon2 = "0.5"
-jsonwebtoken = "9"
+jsonwebtoken = "10"
 storekey = "0.5"
 walkdir = { version = "2", optional = true }
 
@@ -71,6 +71,7 @@ optional = true
 
 [dev-dependencies]
 pretty_assertions = "1"
+proptest = "1"
 tempfile = "3"
 walkdir = "2"
 surrealdb = { version = "3", default-features = false, features = ["kv-mem"] }

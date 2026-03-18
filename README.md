@@ -12,6 +12,7 @@
 <p align="center">
   <a href="https://github.com/overrealdb/surql-parser/actions/workflows/ci.yml"><img src="https://github.com/overrealdb/surql-parser/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
   <a href="https://github.com/overrealdb/surql-parser/actions/workflows/security.yml"><img src="https://github.com/overrealdb/surql-parser/actions/workflows/security.yml/badge.svg" alt="Security" /></a>
+  <a href="https://codecov.io/gh/overrealdb/surql-parser"><img src="https://codecov.io/gh/overrealdb/surql-parser/graph/badge.svg" alt="codecov" /></a>
   <a href="https://crates.io/crates/surql-parser"><img src="https://img.shields.io/crates/v/surql-parser.svg" alt="crates.io" /></a>
   <a href="https://docs.rs/surql-parser"><img src="https://docs.rs/surql-parser/badge.svg" alt="docs.rs" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue.svg" alt="License" /></a>
