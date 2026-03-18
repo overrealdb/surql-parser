@@ -3,6 +3,11 @@ on:
   push:
     branches: [main]
   pull_request:
+    types: [opened, synchronize, reopened]
+
+# Prevent fork PRs from accessing secrets
+permissions:
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -32,8 +37,9 @@ jobs:
           cargo run --features cli -- check /tmp/test.surql
           cargo run --features cli -- schema /tmp/test.surql
 
-  # Docker: validate against real SurrealDB (~5-8 min)
+  # Docker validation — only on main (not on fork PRs, saves minutes)
   validate:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

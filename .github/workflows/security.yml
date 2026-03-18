@@ -2,7 +2,7 @@ name: Security
 on:
   push:
     branches: [main]
-  pull_request:
+  # Only on main push, NOT on PRs (saves minutes, prevents secret exposure)
   schedule:
     - cron: "0 6 * * 1" # weekly Monday 6am UTC
 
@@ -10,8 +10,6 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # License, advisory, and supply chain check
-  # Uses cargo-deny which supports ignore list for dev-dep advisories
   deny:
     runs-on: ubuntu-latest
     steps:
