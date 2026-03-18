@@ -5,16 +5,6 @@
 
 use surql_parser::parse;
 
-fn assert_parse_error(input: &str, expected_fragment: &str) {
-	let result = parse(input);
-	assert!(result.is_err(), "Expected error for: {input}");
-	let err = result.unwrap_err().to_string();
-	assert!(
-		err.contains(expected_fragment),
-		"Error for '{input}' should contain '{expected_fragment}', got:\n{err}"
-	);
-}
-
 fn assert_rejects(input: &str) {
 	assert!(parse(input).is_err(), "Should reject: {input}");
 }

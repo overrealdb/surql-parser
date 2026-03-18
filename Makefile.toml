@@ -63,6 +63,7 @@ dependencies = ["clippy", "fmt-check", "deny"]
 [tasks.ci]
 description = "Full CI pipeline: check + test + lint"
 dependencies = ["check", "test", "clippy", "fmt-check"]
+env = { "RUSTFLAGS" = "-D warnings" }
 
 [tasks.ci-full]
 description = "Full CI with Docker validation + security"
