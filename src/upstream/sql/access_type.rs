@@ -4,11 +4,11 @@ use crate::upstream::fmt::CoverStmts;
 use crate::upstream::sql::{Algorithm, Literal};
 use anyhow::Result;
 use rand::Rng;
-use rand::distributions::Alphanumeric;
+use rand::distr::Alphanumeric;
 use std::str::FromStr;
 use surrealdb_types::{SqlFormat, ToSql, write_sql};
 pub fn random_key() -> String {
-	rand::thread_rng()
+	rand::rng()
 		.sample_iter(&Alphanumeric)
 		.take(128)
 		.map(char::from)

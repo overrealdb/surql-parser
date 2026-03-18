@@ -4,7 +4,7 @@ use crate::upstream::sql::{Base, Expr, Literal};
 use argon2::Argon2;
 use argon2::password_hash::{PasswordHasher, SaltString};
 use rand::Rng;
-use rand::distributions::Alphanumeric;
+use rand::distr::Alphanumeric;
 use rand::rngs::OsRng;
 use surrealdb_types::{SqlFormat, ToSql, write_sql};
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
