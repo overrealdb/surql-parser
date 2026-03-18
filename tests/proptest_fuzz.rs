@@ -25,6 +25,11 @@ proptest! {
 
 // ─── Roundtrip: parse → format → parse is stable ───
 
+/// Generate a safe identifier (backtick-escaped to avoid reserved keyword collisions).
+fn safe_ident() -> impl Strategy<Value = String> {
+	"[a-z]{1,8}".prop_map(|s| format!("`{s}`"))
+}
+
 fn surql_statement() -> impl Strategy<Value = String> {
 	prop_oneof![
 		Just("SELECT * FROM user".to_string()),
@@ -40,8 +45,8 @@ fn surql_statement() -> impl Strategy<Value = String> {
 		Just("RELATE user:a->knows->user:b".to_string()),
 		// Parameterized variants
 		(1..100i64).prop_map(|n| format!("SELECT * FROM user LIMIT {n}")),
-		("[a-z]{1,8}").prop_map(|name| format!("SELECT * FROM {name}")),
-		("[a-z]{1,8}", "[a-z]{1,8}")
+		safe_ident().prop_map(|name| format!("SELECT * FROM {name}")),
+		(safe_ident(), safe_ident())
 			.prop_map(|(table, field)| { format!("DEFINE FIELD {field} ON {table} TYPE string") }),
 	]
 }
