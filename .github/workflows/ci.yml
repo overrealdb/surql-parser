@@ -28,6 +28,7 @@ jobs:
   # CLI: build + smoke test (~2 min)
   cli:
     runs-on: ubuntu-latest
+    environment: ${{ github.event_name == 'pull_request' && !startsWith(github.head_ref, 'release-plz-') && 'ci' || '' }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
