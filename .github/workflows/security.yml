@@ -10,16 +10,8 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # Dependency audit — check for known vulnerabilities (CVEs)
-  audit:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: rustsec/audit-check@v2
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-
-  # License and supply chain check
+  # License, advisory, and supply chain check
+  # Uses cargo-deny which supports ignore list for dev-dep advisories
   deny:
     runs-on: ubuntu-latest
     steps:
