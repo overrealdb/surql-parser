@@ -1,0 +1,10 @@
+error: Invalid SurrealQL: Invalid query: Unexpected token `an identifier`, expected Eof
+ --> [1:7]
+  |
+1 | SELCT name FROM user
+  |       ^^^^
+
+ --> tests/ui/fail_typo_keyword.rs:5:23
+  |
+5 |     let _ = surql_check!("SELCT name FROM user");
+  |                          ^^^^^^^^^^^^^^^^^^^^^^

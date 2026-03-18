@@ -72,6 +72,63 @@ assert!(surql_parser::is_reserved_keyword("SELECT"));
 assert!(!surql_parser::is_reserved_keyword("username"));
 ```
 
+## Compile-Time Tools
+
+### `surql-macros` — proc-macro crate
+
+Validate SurrealQL at compile time:
+
+```toml
+[dependencies]
+surql-macros = "0.1"
+```
+
+```rust
+use surql_macros::{surql_check, surql_function};
+
+// Compile-time validated query — typo here is a compile error
+const QUERY: &str = surql_check!("SELECT * FROM user WHERE age > 18");
+
+// Compile-time validated function name
+#[surql_function("fn::get_user")]
+fn get_user_call(id: &str) -> String {
+    format!("fn::get_user('{id}')")
+}
+```
+
+Errors show both the SurrealQL location and the Rust source location:
+
+```
+error: Invalid SurrealQL: Unexpected token `WHERE`, expected FROM
+ --> [1:10]
+  |
+1 | SELECT * WHERE age > 18
+  |          ^^^^^
+```
+
+### `build.rs` helper (feature `build`)
+
+Validate `.surql` files and generate typed constants at build time:
+
+```toml
+[build-dependencies]
+surql-parser = { version = "0.1", features = ["build"] }
+```
+
+```rust
+// build.rs
+fn main() {
+    let out_dir = std::env::var("OUT_DIR").unwrap();
+    surql_parser::build::validate_schema("surql/");
+    surql_parser::build::generate_typed_functions(
+        "surql/",
+        format!("{out_dir}/surql_functions.rs"),
+    );
+}
+```
+
+This generates constants like `FN_GET_USER: &str = "fn::get_user"` with doc comments showing parameter types and return types. See `examples/sample-project/` for a complete working example.
+
 ## CLI Tool
 
 ```sh
@@ -87,7 +144,10 @@ surql tables schema/               # list table definitions
 ## Testing
 
 ```sh
-cargo test                               # parser only (instant)
+cargo test                               # parser tests (instant)
+cargo test --features build              # + build helper tests
+cargo test -p surql-macros               # proc-macro tests (trybuild)
+cargo test -p surql-sample-project       # e2e: build.rs + macros
 cargo test --features validate-mem       # + in-memory SurrealDB
 cargo test --features validate-docker    # + real SurrealDB in Docker
 ```

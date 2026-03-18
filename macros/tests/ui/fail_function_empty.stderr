@@ -1,0 +1,5 @@
+error: surql_function name must start with 'fn::'
+ --> tests/ui/fail_function_empty.rs:3:18
+  |
+3 | #[surql_function("")]
+  |                  ^^

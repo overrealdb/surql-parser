@@ -1,0 +1,16 @@
+[package]
+name = "surql-sample-project"
+version = "0.0.0"
+edition = "2024"
+publish = false
+rust-version = "1.94"
+
+[dependencies]
+surql-macros = { path = "../../macros" }
+
+[build-dependencies]
+surql-parser = { path = "../..", features = ["build"] }
+
+[dev-dependencies]
+tempfile = "3"
+surql-parser = { path = "../..", features = ["build"] }

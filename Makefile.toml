@@ -25,7 +25,7 @@ args = ["test", "--features", "validate-docker"]
 
 [tasks.test-all]
 description = "Run all test modes"
-dependencies = ["test", "test-docker"]
+dependencies = ["test", "test-mem", "test-docker"]
 
 # ─── Quality ───
 
@@ -89,6 +89,28 @@ script = ["SURREALDB_LOCAL=${SURREALDB_LOCAL:-} ./scripts/sync-upstream.sh local
 [tasks.sync-main]
 description = "Sync parser from SurrealDB main branch"
 script = ["./scripts/sync-upstream.sh main"]
+
+# ─── Macros ───
+
+[tasks.check-macros]
+description = "Check macros crate"
+command = "cargo"
+args = ["check", "-p", "surql-macros"]
+
+[tasks.test-macros]
+description = "Test macros crate"
+command = "cargo"
+args = ["test", "-p", "surql-macros"]
+
+[tasks.clippy-macros]
+description = "Lint macros crate"
+command = "cargo"
+args = ["clippy", "-p", "surql-macros", "--", "-D", "warnings"]
+
+[tasks.test-e2e]
+description = "Run e2e sample project tests"
+command = "cargo"
+args = ["test", "-p", "surql-sample-project"]
 
 # ─── Publish ───
 

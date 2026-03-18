@@ -1,0 +1,10 @@
+error: Invalid SurrealQL: Invalid query: Unexpected end of file, expected an expression
+ --> [1:12]
+  |
+1 | DEFINE TABLE
+  |            ^
+
+ --> tests/ui/fail_partial_define.rs:5:23
+  |
+5 |     let _ = surql_check!("DEFINE TABLE");
+  |                          ^^^^^^^^^^^^^^

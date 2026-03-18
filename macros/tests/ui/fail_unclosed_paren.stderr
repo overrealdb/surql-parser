@@ -1,0 +1,14 @@
+error: Invalid SurrealQL: Invalid query: Unexpected token `Eof` expected delimiter `)`
+ --> [1:33]
+  |
+1 | SELECT * FROM (SELECT * FROM user
+  |                                 ^
+ --> [1:15]
+  |
+1 | SELECT * FROM (SELECT * FROM user
+  |               ^ expected this delimiter to close
+
+ --> tests/ui/fail_unclosed_paren.rs:5:23
+  |
+5 |     let _ = surql_check!("SELECT * FROM (SELECT * FROM user");
+  |                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

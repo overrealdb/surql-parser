@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "tools/transform"]
+members = [".", "tools/transform", "macros", "examples/sample-project"]
 
 [package]
 name = "surql-parser"
@@ -14,6 +14,8 @@ rust-version = "1.94"
 readme = "README.md"
 exclude = [
     "tools/",
+    "macros/",
+    "examples/",
     "scripts/",
     "transforms/",
     "tests/fixtures/",
@@ -55,6 +57,7 @@ required-features = ["cli"]
 default = []
 arbitrary = []    # placeholder for upstream cfg_attr(feature = "arbitrary", ...)
 surrealism = []   # placeholder for upstream cfg_attr(feature = "surrealism", ...)
+build = ["dep:walkdir"]
 cli = ["dep:clap", "dep:walkdir"]
 # Validation modes (Layer 3 testing):
 # Validation features only activate dev-dependencies in tests — zero impact on library users.
@@ -68,6 +71,7 @@ optional = true
 
 [dev-dependencies]
 pretty_assertions = "1"
+tempfile = "3"
 walkdir = "2"
 surrealdb = { version = "3", default-features = false, features = ["kv-mem"] }
 reqwest = { version = "0.12", features = ["json", "blocking"] }

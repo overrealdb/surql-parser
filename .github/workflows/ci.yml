@@ -16,6 +16,8 @@ jobs:
   # Fast: check + test + clippy + fmt (~2 min)
   ci:
     runs-on: ubuntu-latest
+    # On PRs: require maintainer approval via "ci" environment
+    environment: ${{ github.event_name == 'pull_request' && 'ci' || '' }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

@@ -1,0 +1,10 @@
+error: Invalid SurrealQL: Invalid query: Unexpected end of file, expected string to end.
+ --> [1:33]
+  |
+1 | SELECT * FROM user WHERE name = 'Alice
+  |                                 ^ String starting here.
+
+ --> tests/ui/fail_check_unclosed_string.rs:4:23
+  |
+4 |     let _ = surql_check!("SELECT * FROM user WHERE name = 'Alice");
+  |                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

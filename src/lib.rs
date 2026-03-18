@@ -21,6 +21,9 @@ extern crate tracing;
 pub mod compat;
 pub mod config;
 
+#[cfg(feature = "build")]
+pub mod build;
+
 #[allow(
 	clippy::useless_conversion,
 	clippy::large_enum_variant,

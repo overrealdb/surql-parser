@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+set -e
+
+# Quick local checks before commit
+cargo fmt --check 2>/dev/null
+if [ $? -ne 0 ]; then
+	echo "ERROR: cargo fmt --check failed. Run 'cargo fmt' first."
+	exit 1
+fi
+
+cargo clippy -- -D warnings 2>/dev/null
+if [ $? -ne 0 ]; then
+	echo "ERROR: clippy found warnings. Fix them before committing."
+	exit 1
+fi
+
+echo ""
+echo "┌─────────────────────────────────────────────────────────┐"
+echo "│  Don't forget to run the full check before pushing:     │"
+echo "│                                                         │"
+echo "│    cargo make ci          # fmt + clippy + unit tests   │"
+echo "│    cargo make ci-full     # + docker tests + deny       │"
+echo "│                                                         │"
+echo "│  Or at minimum:                                         │"
+echo "│    cargo make test-mem    # integration tests (no Docker)│"
+echo "└─────────────────────────────────────────────────────────┘"
+echo ""
