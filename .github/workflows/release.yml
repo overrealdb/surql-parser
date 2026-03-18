@@ -1,110 +1,22 @@
 name: Release
 
-# Manual trigger only — press the button in GitHub Actions UI
 on:
-  workflow_dispatch:
-    inputs:
-      version:
-        description: "Version to release (e.g., 0.1.0)"
-        required: true
-        type: string
-      dry_run:
-        description: "Dry run (don't actually publish)"
-        required: false
-        type: boolean
-        default: false
+  push:
+    branches: [main]
 
 permissions:
+  pull-requests: write
   contents: write
 
-env:
-  CARGO_TERM_COLOR: always
-
 jobs:
-  # Verify everything passes before releasing
-  verify:
+  release-plz:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - uses: davidB/rust-cargo-make@v1
-      - run: cargo make ci
-      - run: cargo test --features validate-docker
-
-  # Build CLI binaries for multiple platforms
-  build:
-    needs: verify
-    strategy:
-      matrix:
-        include:
-          - target: x86_64-unknown-linux-gnu
-            os: ubuntu-latest
-          - target: aarch64-apple-darwin
-            os: macos-latest
-          - target: x86_64-apple-darwin
-            os: macos-latest
-    runs-on: ${{ matrix.os }}
-    env:
-      TARGET: ${{ matrix.target }}
-      VERSION: ${{ inputs.version }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.target }}
-      - uses: Swatinem/rust-cache@v2
-
-      - name: Build CLI
-        run: cargo build --release --features cli --target "$TARGET"
-
-      - name: Package
-        shell: bash
-        run: |
-          BIN="target/${TARGET}/release/surql"
-          ARCHIVE="surql-v${VERSION}-${TARGET}.tar.gz"
-          tar czf "$ARCHIVE" -C "$(dirname "$BIN")" "$(basename "$BIN")"
-          echo "ARCHIVE=$ARCHIVE" >> "$GITHUB_ENV"
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: "surql-${{ matrix.target }}"
-          path: ${{ env.ARCHIVE }}
-
-  # Publish to crates.io + create GitHub release
-  publish:
-    needs: build
-    runs-on: ubuntu-latest
-    env:
-      VERSION: ${{ inputs.version }}
-      DRY_RUN: ${{ inputs.dry_run }}
-    steps:
-      - uses: actions/checkout@v4
+          fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
-
-      - name: Download all artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: dist/
-
-      - name: Publish to crates.io
-        run: |
-          if [ "$DRY_RUN" = "true" ]; then
-            echo "DRY RUN — skipping cargo publish"
-            cargo publish --dry-run
-          else
-            cargo publish
-          fi
+      - uses: MarcoIeni/release-plz-action@v0.5
         env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-
-      - name: Create GitHub Release
-        if: inputs.dry_run == false
-        run: |
-          gh release create "v${VERSION}" \
-            --title "v${VERSION}" \
-            --generate-notes \
-            dist/**/*.tar.gz
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
