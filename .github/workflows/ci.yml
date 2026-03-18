@@ -19,7 +19,7 @@ jobs:
     # On PRs: require maintainer approval via "ci" environment (skip for release-plz)
     environment: ${{ github.event_name == 'pull_request' && !startsWith(github.head_ref, 'release-plz-') && 'ci' || '' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - uses: davidB/rust-cargo-make@v1
@@ -28,8 +28,9 @@ jobs:
   # CLI: build + smoke test (~2 min)
   cli:
     runs-on: ubuntu-latest
+    environment: ${{ github.event_name == 'pull_request' && !startsWith(github.head_ref, 'release-plz-') && 'ci' || '' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --features cli
@@ -39,12 +40,12 @@ jobs:
           cargo run --features cli -- check /tmp/test.surql
           cargo run --features cli -- schema /tmp/test.surql
 
-  # Docker validation — only on main (not on fork PRs, saves minutes)
+  # Docker validation — runs after fast checks pass (on main and approved PRs)
   validate:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [ci, cli]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --features validate-docker
