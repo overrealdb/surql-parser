@@ -88,13 +88,28 @@ jobs:
         with:
           path: dist/
 
-      - name: Publish to crates.io
+      - name: Publish surql-parser to crates.io
         run: |
           if [ "$DRY_RUN" = "true" ]; then
             echo "DRY RUN — skipping cargo publish"
             cargo publish --dry-run
           else
             cargo publish
+          fi
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+      - name: Wait for crates.io to index surql-parser
+        if: inputs.dry_run == false
+        run: sleep 30
+
+      - name: Publish surql-macros to crates.io
+        run: |
+          if [ "$DRY_RUN" = "true" ]; then
+            echo "DRY RUN — skipping surql-macros publish"
+            cargo publish -p surql-macros --dry-run
+          else
+            cargo publish -p surql-macros
           fi
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
