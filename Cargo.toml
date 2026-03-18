@@ -71,6 +71,7 @@ optional = true
 
 [dev-dependencies]
 pretty_assertions = "1"
+proptest = "1"
 tempfile = "3"
 walkdir = "2"
 surrealdb = { version = "3", default-features = false, features = ["kv-mem"] }

@@ -13,7 +13,7 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # Fast: check + test + clippy + fmt (~2 min)
+  # Fast: check + test + clippy + fmt + coverage (~3 min)
   ci:
     runs-on: ubuntu-latest
     # On PRs: require maintainer approval via "ci" environment (skip for release-plz)
@@ -21,9 +21,18 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
       - uses: Swatinem/rust-cache@v2
       - uses: davidB/rust-cargo-make@v1
+      - uses: taiki-e/install-action@cargo-llvm-cov
       - run: cargo make ci
+      - name: Upload coverage to Codecov
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: codecov/codecov-action@v5
+        with:
+          files: lcov.info
+          fail_ci_if_error: false
 
   # CLI: build + smoke test (~2 min)
   cli:
