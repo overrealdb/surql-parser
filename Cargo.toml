@@ -78,4 +78,4 @@ surrealdb = { version = "3", default-features = false, features = ["kv-mem"] }
 reqwest = { version = "0.12", features = ["json", "blocking"] }
 tokio = { version = "1", features = ["full"] }
 testcontainers = "0.23"
-testcontainers-modules = { version = "0.11", features = ["surrealdb"] }
+testcontainers-modules = { version = "0.12", features = ["surrealdb"] }
