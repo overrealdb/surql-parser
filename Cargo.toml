@@ -45,7 +45,7 @@ rand = "0.8"
 bytes = "1"
 argon2 = "0.5"
 jsonwebtoken = "10"
-storekey = "0.5"
+storekey = "0.11"
 walkdir = { version = "2", optional = true }
 
 [[bin]]
