@@ -41,7 +41,7 @@ tracing = "0.1"
 thiserror = "2"
 unicase = "2.9"
 phf = { version = "0.13", features = ["macros", "unicase"] }
-rand = "0.9"
+rand = "0.10"
 bytes = "1"
 argon2 = "0.5"
 jsonwebtoken = "10"
