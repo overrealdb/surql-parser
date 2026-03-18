@@ -35,17 +35,17 @@ geo-types = "0.7"
 uuid = { version = "1", features = ["v4", "v7"] }
 rust_decimal = { version = "1", features = ["maths"] }
 regex = "1"
-revision = "0.10"
+revision = "0.17"
 serde = { version = "1", features = ["derive", "rc"] }
 tracing = "0.1"
 thiserror = "2"
 unicase = "2.9"
 phf = { version = "0.13", features = ["macros", "unicase"] }
-rand = "0.8"
+rand = "0.9"
 bytes = "1"
 argon2 = "0.5"
 jsonwebtoken = "10"
-storekey = "0.5"
+storekey = "0.11"
 walkdir = { version = "2", optional = true }
 
 [[bin]]
@@ -75,7 +75,7 @@ proptest = "1"
 tempfile = "3"
 walkdir = "2"
 surrealdb = { version = "3", default-features = false, features = ["kv-mem"] }
-reqwest = { version = "0.12", features = ["json", "blocking"] }
+reqwest = { version = "0.13", features = ["json", "blocking"] }
 tokio = { version = "1", features = ["full"] }
-testcontainers = "0.23"
-testcontainers-modules = { version = "0.11", features = ["surrealdb"] }
+testcontainers = "0.24"
+testcontainers-modules = { version = "0.12", features = ["surrealdb"] }

@@ -13,7 +13,7 @@ syn = { version = "2", features = ["full", "visit-mut", "parsing", "printing"] }
 quote = "1"
 proc-macro2 = "1"
 prettyplease = "0.2"
-toml = "0.8"
+toml = "1"
 serde = { version = "1", features = ["derive"] }
 walkdir = "2"
 anyhow = "1"

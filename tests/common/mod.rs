@@ -79,8 +79,10 @@ mod docker {
 	fn get_test_db() -> &'static TestDb {
 		TEST_DB.get_or_init(|| {
 			get_runtime().block_on(async {
+				use testcontainers::core::ImageExt;
 				use testcontainers::runners::AsyncRunner;
 				let container = testcontainers_modules::surrealdb::SurrealDb::default()
+					.with_tag("v3")
 					.start()
 					.await
 					.expect("Failed to start SurrealDB (is Docker running?)");
