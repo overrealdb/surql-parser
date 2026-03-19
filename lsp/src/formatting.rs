@@ -9,8 +9,13 @@ pub fn format_document(source: &str) -> Option<Vec<TextEdit>> {
 	if formatted == source {
 		return None;
 	}
-	let line_count = source.lines().count().max(1) as u32;
-	let last_line_len = source.lines().last().map(|l| l.len()).unwrap_or(0) as u32;
+	// LSP positions are 0-indexed. End position = after last character.
+	let last_line_idx = source.lines().count().saturating_sub(1) as u32;
+	let last_line_chars = source
+		.lines()
+		.last()
+		.map(|l| l.chars().count())
+		.unwrap_or(0) as u32;
 	Some(vec![TextEdit {
 		range: Range {
 			start: Position {
@@ -18,8 +23,8 @@ pub fn format_document(source: &str) -> Option<Vec<TextEdit>> {
 				character: 0,
 			},
 			end: Position {
-				line: line_count,
-				character: last_line_len,
+				line: last_line_idx,
+				character: last_line_chars,
 			},
 		},
 		new_text: formatted,

@@ -91,7 +91,15 @@ pub fn surql_query(input: TokenStream) -> TokenStream {
 	}
 
 	// 2. Extract $param names from the query
-	let query_params = surql_parser::extract_params(&sql).unwrap_or_default();
+	let query_params = match surql_parser::extract_params(&sql) {
+		Ok(params) => params,
+		Err(e) => {
+			let msg = format!("Failed to extract parameters: {e}");
+			return syn::Error::new(input.sql.span(), msg)
+				.to_compile_error()
+				.into();
+		}
+	};
 
 	// 3. If caller provided param names, verify they match
 	if !input.params.is_empty() {

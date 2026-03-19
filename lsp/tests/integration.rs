@@ -481,10 +481,14 @@ async fn full_lifecycle() {
 	let comp = server.request_completion(uri, 0, 0).await;
 	assert!(!comp["result"].as_array().unwrap().is_empty());
 
-	// 4. Request formatting
+	// 4. Request formatting — valid SQL, may or may not need edits
 	let fmt = server.request_formatting(uri).await;
-	// Already formatted → null or empty edits
-	let _ = fmt;
+	// Result is either null (already formatted) or array of edits — both valid
+	assert!(
+		fmt["result"].is_null() || fmt["result"].is_array(),
+		"formatting should return null or array, got: {}",
+		fmt["result"]
+	);
 
 	// 5. Shutdown
 	server.shutdown().await;
