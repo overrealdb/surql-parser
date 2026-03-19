@@ -14,7 +14,7 @@ fn basic_table_and_fields() {
 	)
 	.unwrap();
 
-	assert_eq!(sg.table_names().len(), 1);
+	assert_eq!(sg.table_names().count(), 1);
 	assert!(sg.table("user").is_some());
 	assert_eq!(sg.fields_of("user").len(), 3);
 
@@ -80,7 +80,7 @@ fn function_names() {
 	)
 	.unwrap();
 
-	let mut names = sg.function_names();
+	let mut names: Vec<&str> = sg.function_names().collect();
 	names.sort();
 	assert_eq!(names, vec!["add", "greet"]);
 }
@@ -135,7 +135,7 @@ fn merge_graphs() {
 	.unwrap();
 
 	sg1.merge(sg2);
-	assert_eq!(sg1.table_names().len(), 2);
+	assert_eq!(sg1.table_names().count(), 2);
 	assert!(sg1.table("user").is_some());
 	assert!(sg1.table("post").is_some());
 }
@@ -176,8 +176,8 @@ fn relation_table() {
 #[test]
 fn empty_schema() {
 	let sg = SchemaGraph::from_source("SELECT * FROM user").unwrap();
-	assert!(sg.table_names().is_empty());
-	assert!(sg.function_names().is_empty());
+	assert_eq!(sg.table_names().count(), 0);
+	assert_eq!(sg.function_names().count(), 0);
 }
 
 #[test]

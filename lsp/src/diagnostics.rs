@@ -7,7 +7,7 @@ use surql_parser::upstream::sql::ast::TopLevelExpr;
 use tower_lsp::lsp_types::{Diagnostic, DiagnosticSeverity, Position, Range};
 
 /// Result of parsing a document: partial AST + diagnostics.
-pub struct ParseResult {
+pub struct DocumentParseResult {
 	pub statements: Vec<TopLevelExpr>,
 	pub diagnostics: Vec<Diagnostic>,
 }
@@ -16,7 +16,7 @@ pub struct ParseResult {
 ///
 /// Returns both the successfully parsed statements (for schema/completions)
 /// and diagnostics for broken statements.
-pub fn compute_with_recovery(source: &str) -> ParseResult {
+pub fn compute_with_recovery(source: &str) -> DocumentParseResult {
 	let (stmts, diags) = surql_parser::parse_with_recovery(source);
 	let diagnostics = diags
 		.into_iter()
@@ -37,7 +37,7 @@ pub fn compute_with_recovery(source: &str) -> ParseResult {
 			..Default::default()
 		})
 		.collect();
-	ParseResult {
+	DocumentParseResult {
 		statements: stmts,
 		diagnostics,
 	}

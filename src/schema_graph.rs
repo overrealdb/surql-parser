@@ -16,42 +16,42 @@
 //!     DEFINE FUNCTION fn::greet($name: string) -> string { RETURN 'Hello, ' + $name; };
 //! ").unwrap();
 //!
-//! assert_eq!(schema.table_names().len(), 1);
+//! assert_eq!(schema.table_names().count(), 1);
 //! assert_eq!(schema.fields_of("user").len(), 2);
 //! assert_eq!(schema.indexes_of("user").len(), 1);
 //! assert!(schema.function("greet").is_some());
 //! ```
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+use std::sync::Arc;
 
 use surrealdb_types::{SqlFormat, ToSql};
 
 /// Source location of a definition in a `.surql` file.
 #[derive(Debug, Clone)]
 pub struct SourceLocation {
-	pub file: PathBuf,
+	pub file: Arc<Path>,
 	pub offset: usize,
 	pub len: usize,
 }
 
-/// Information about a table definition.
+/// A parsed table definition.
 #[derive(Debug, Clone)]
-pub struct TableInfo {
+pub struct TableDef {
 	pub name: String,
 	pub full: bool,
 	pub table_type: String,
-	pub fields: Vec<FieldInfo>,
-	pub indexes: Vec<IndexInfo>,
-	pub events: Vec<EventInfo>,
+	pub fields: Vec<FieldDef>,
+	pub indexes: Vec<IndexDef>,
+	pub events: Vec<EventDef>,
 	pub source: Option<SourceLocation>,
 }
 
-/// Information about a field definition.
+/// A parsed field definition.
 #[derive(Debug, Clone)]
-pub struct FieldInfo {
+pub struct FieldDef {
 	pub name: String,
-	pub table: String,
 	pub kind: Option<String>,
 	pub record_links: Vec<String>,
 	pub default: Option<String>,
@@ -59,36 +59,34 @@ pub struct FieldInfo {
 	pub source: Option<SourceLocation>,
 }
 
-/// Information about an index definition.
+/// A parsed index definition.
 #[derive(Debug, Clone)]
-pub struct IndexInfo {
+pub struct IndexDef {
 	pub name: String,
-	pub table: String,
 	pub columns: Vec<String>,
 	pub unique: bool,
 	pub source: Option<SourceLocation>,
 }
 
-/// Information about an event definition.
+/// A parsed event definition.
 #[derive(Debug, Clone)]
-pub struct EventInfo {
+pub struct EventDef {
 	pub name: String,
-	pub table: String,
 	pub source: Option<SourceLocation>,
 }
 
-/// Information about a function definition.
+/// A parsed function definition.
 #[derive(Debug, Clone)]
-pub struct FunctionInfo {
+pub struct FunctionDef {
 	pub name: String,
 	pub args: Vec<(String, String)>,
 	pub returns: Option<String>,
 	pub source: Option<SourceLocation>,
 }
 
-/// Information about a param definition.
+/// A parsed param definition.
 #[derive(Debug, Clone)]
-pub struct ParamInfo {
+pub struct ParamDef {
 	pub name: String,
 	pub source: Option<SourceLocation>,
 }
@@ -99,9 +97,9 @@ pub struct ParamInfo {
 /// functions, and their relationships.
 #[derive(Debug, Clone, Default)]
 pub struct SchemaGraph {
-	tables: HashMap<String, TableInfo>,
-	functions: HashMap<String, FunctionInfo>,
-	params: HashMap<String, ParamInfo>,
+	tables: HashMap<String, TableDef>,
+	functions: HashMap<String, FunctionDef>,
+	params: HashMap<String, ParamDef>,
 }
 
 impl SchemaGraph {
@@ -129,7 +127,6 @@ impl SchemaGraph {
 			if path.is_file() && path.extension().is_some_and(|ext| ext == "surql") {
 				let content = std::fs::read_to_string(&path)?;
 				let mut file_graph = Self::from_source(&content)?;
-				// Attach source locations
 				file_graph.attach_source_locations(&content, &path);
 				graph.merge(file_graph);
 			} else if path.is_dir() {
@@ -140,9 +137,6 @@ impl SchemaGraph {
 	}
 
 	/// Scan source text via the lexer for DEFINE statement positions.
-	///
-	/// Uses the actual token stream, so it correctly skips strings and comments
-	/// (unlike the previous string-search approach).
 	fn attach_source_locations(&mut self, source: &str, file: &Path) {
 		use crate::upstream::syn::lexer::Lexer;
 		use crate::upstream::syn::token::TokenKind;
@@ -153,13 +147,11 @@ impl SchemaGraph {
 		}
 
 		let tokens: Vec<_> = Lexer::new(bytes).collect();
-		let file = file.to_path_buf();
+		let file: Arc<Path> = Arc::from(file);
 
 		for i in 0..tokens.len() {
-			// Look for DEFINE keyword
 			let define_token = &tokens[i];
-			let define_text = token_text(source, define_token);
-			if define_text.to_uppercase() != "DEFINE" {
+			if token_text(source, define_token).to_uppercase() != "DEFINE" {
 				continue;
 			}
 
@@ -173,21 +165,18 @@ impl SchemaGraph {
 					break;
 				}
 			}
-
 			if j >= tokens.len() {
 				continue;
 			}
 
-			let kind_token = &tokens[j];
-			let kind_text = token_text(source, kind_token).to_uppercase();
+			let kind_text = token_text(source, &tokens[j]).to_uppercase();
 
-			// DEFINE TABLE <name>
 			if kind_text == "TABLE" && j + 1 < tokens.len() {
 				let name_token = &tokens[j + 1];
 				let name = token_text(source, name_token);
 				if let Some(table) = self.tables.get_mut(name).filter(|t| t.source.is_none()) {
 					table.source = Some(SourceLocation {
-						file: file.clone(),
+						file: Arc::clone(&file),
 						offset: define_token.span.offset as usize,
 						len: (name_token.span.offset + name_token.span.len
 							- define_token.span.offset) as usize,
@@ -195,10 +184,7 @@ impl SchemaGraph {
 				}
 			}
 
-			// DEFINE FUNCTION fn::<name>
 			if kind_text == "FUNCTION" && j + 1 < tokens.len() {
-				// After FUNCTION, there's fn :: name or just the function identifier
-				// Scan forward to collect the full function path
 				let fn_start = j + 1;
 				let mut fn_end = fn_start;
 				while fn_end < tokens.len() {
@@ -213,7 +199,6 @@ impl SchemaGraph {
 					}
 				}
 				if fn_end > fn_start {
-					// Reconstruct function name from tokens
 					let name_start = tokens[fn_start].span.offset as usize;
 					let name_end =
 						(tokens[fn_end - 1].span.offset + tokens[fn_end - 1].span.len) as usize;
@@ -225,7 +210,7 @@ impl SchemaGraph {
 						.filter(|f| f.source.is_none())
 					{
 						func.source = Some(SourceLocation {
-							file: file.clone(),
+							file: Arc::clone(&file),
 							offset: define_token.span.offset as usize,
 							len: name_end - define_token.span.offset as usize,
 						});
@@ -233,11 +218,8 @@ impl SchemaGraph {
 				}
 			}
 
-			// DEFINE FIELD <name> ON <table>
 			if kind_text == "FIELD" && j + 1 < tokens.len() {
-				let name_token = &tokens[j + 1];
-				let field_name = token_text(source, name_token);
-				// Find ON keyword to get the table name
+				let field_name = token_text(source, &tokens[j + 1]);
 				for k in (j + 2)..tokens.len().min(j + 6) {
 					if token_text(source, &tokens[k]).to_uppercase() == "ON" && k + 1 < tokens.len()
 					{
@@ -246,7 +228,7 @@ impl SchemaGraph {
 							for field in &mut table.fields {
 								if field.name == field_name && field.source.is_none() {
 									field.source = Some(SourceLocation {
-										file: file.clone(),
+										file: Arc::clone(&file),
 										offset: define_token.span.offset as usize,
 										len: (tokens[(k + 1).min(tokens.len() - 1)].span.offset
 											+ tokens[(k + 1).min(tokens.len() - 1)].span.len
@@ -283,16 +265,14 @@ impl SchemaGraph {
 	fn from_definitions(defs: &crate::SchemaDefinitions) -> Self {
 		let mut graph = Self::default();
 
-		// Tables
 		for t in &defs.tables {
 			let name = expr_to_string(&t.name);
-			let table_type = format!("{:?}", t.table_type);
 			graph.tables.insert(
 				name.clone(),
-				TableInfo {
+				TableDef {
 					name,
 					full: t.full,
-					table_type,
+					table_type: format!("{:?}", t.table_type),
 					fields: Vec::new(),
 					indexes: Vec::new(),
 					events: Vec::new(),
@@ -301,7 +281,6 @@ impl SchemaGraph {
 			);
 		}
 
-		// Fields
 		for f in &defs.fields {
 			let field_name = expr_to_string(&f.name);
 			let table_name = expr_to_string(&f.what);
@@ -321,9 +300,8 @@ impl SchemaGraph {
 				| crate::upstream::sql::statements::define::DefineDefault::Set(e) => Some(expr_to_string(e)),
 			};
 
-			let info = FieldInfo {
+			let def = FieldDef {
 				name: field_name,
-				table: table_name.clone(),
 				kind: kind_str,
 				record_links,
 				default: default_str,
@@ -332,16 +310,15 @@ impl SchemaGraph {
 			};
 
 			if let Some(table) = graph.tables.get_mut(&table_name) {
-				table.fields.push(info);
+				table.fields.push(def);
 			} else {
-				// Table not explicitly defined, create implicit entry
 				graph.tables.insert(
 					table_name.clone(),
-					TableInfo {
+					TableDef {
 						name: table_name,
 						full: false,
 						table_type: "Any".into(),
-						fields: vec![info],
+						fields: vec![def],
 						indexes: Vec::new(),
 						events: Vec::new(),
 						source: None,
@@ -350,43 +327,38 @@ impl SchemaGraph {
 			}
 		}
 
-		// Indexes
 		for idx in &defs.indexes {
 			let index_name = expr_to_string(&idx.name);
 			let table_name = expr_to_string(&idx.what);
 			let columns: Vec<String> = idx.cols.iter().map(expr_to_string).collect();
 			let unique = matches!(idx.index, crate::upstream::sql::index::Index::Uniq);
 
-			let info = IndexInfo {
+			let def = IndexDef {
 				name: index_name,
-				table: table_name.clone(),
 				columns,
 				unique,
 				source: None,
 			};
 
 			if let Some(table) = graph.tables.get_mut(&table_name) {
-				table.indexes.push(info);
+				table.indexes.push(def);
 			}
 		}
 
-		// Events
 		for ev in &defs.events {
 			let event_name = expr_to_string(&ev.name);
 			let table_name = expr_to_string(&ev.target_table);
 
-			let info = EventInfo {
+			let def = EventDef {
 				name: event_name,
-				table: table_name.clone(),
 				source: None,
 			};
 
 			if let Some(table) = graph.tables.get_mut(&table_name) {
-				table.events.push(info);
+				table.events.push(def);
 			}
 		}
 
-		// Functions
 		for func in &defs.functions {
 			let args: Vec<(String, String)> = func
 				.args
@@ -406,7 +378,7 @@ impl SchemaGraph {
 
 			graph.functions.insert(
 				func.name.clone(),
-				FunctionInfo {
+				FunctionDef {
 					name: func.name.clone(),
 					args,
 					returns,
@@ -415,11 +387,10 @@ impl SchemaGraph {
 			);
 		}
 
-		// Params
 		for p in &defs.params {
 			graph.params.insert(
 				p.name.clone(),
-				ParamInfo {
+				ParamDef {
 					name: p.name.clone(),
 					source: None,
 				},
@@ -431,18 +402,18 @@ impl SchemaGraph {
 
 	// ─── Lookups ───
 
-	/// All table names in the schema.
-	pub fn table_names(&self) -> Vec<&str> {
-		self.tables.keys().map(|s| s.as_str()).collect()
+	/// Iterate over all table names in the schema.
+	pub fn table_names(&self) -> impl Iterator<Item = &str> {
+		self.tables.keys().map(|s| s.as_str())
 	}
 
-	/// Get table info by name.
-	pub fn table(&self, name: &str) -> Option<&TableInfo> {
+	/// Get table definition by name.
+	pub fn table(&self, name: &str) -> Option<&TableDef> {
 		self.tables.get(name)
 	}
 
 	/// Fields defined on a table.
-	pub fn fields_of(&self, table: &str) -> &[FieldInfo] {
+	pub fn fields_of(&self, table: &str) -> &[FieldDef] {
 		self.tables
 			.get(table)
 			.map(|t| t.fields.as_slice())
@@ -450,7 +421,7 @@ impl SchemaGraph {
 	}
 
 	/// Indexes defined on a table.
-	pub fn indexes_of(&self, table: &str) -> &[IndexInfo] {
+	pub fn indexes_of(&self, table: &str) -> &[IndexDef] {
 		self.tables
 			.get(table)
 			.map(|t| t.indexes.as_slice())
@@ -458,32 +429,31 @@ impl SchemaGraph {
 	}
 
 	/// Events defined on a table.
-	pub fn events_of(&self, table: &str) -> &[EventInfo] {
+	pub fn events_of(&self, table: &str) -> &[EventDef] {
 		self.tables
 			.get(table)
 			.map(|t| t.events.as_slice())
 			.unwrap_or(&[])
 	}
 
-	/// Get function info by name (without the `fn::` prefix).
-	pub fn function(&self, name: &str) -> Option<&FunctionInfo> {
+	/// Get function definition by name (without the `fn::` prefix).
+	pub fn function(&self, name: &str) -> Option<&FunctionDef> {
 		self.functions.get(name)
 	}
 
-	/// All function names (without `fn::` prefix).
-	pub fn function_names(&self) -> Vec<&str> {
-		self.functions.keys().map(|s| s.as_str()).collect()
+	/// Iterate over all function names (without `fn::` prefix).
+	pub fn function_names(&self) -> impl Iterator<Item = &str> {
+		self.functions.keys().map(|s| s.as_str())
 	}
 
-	/// All defined param names.
-	pub fn param_names(&self) -> Vec<&str> {
-		self.params.keys().map(|s| s.as_str()).collect()
+	/// Iterate over all defined param names.
+	pub fn param_names(&self) -> impl Iterator<Item = &str> {
+		self.params.keys().map(|s| s.as_str())
 	}
 }
 
 // ─── Helpers ───
 
-/// Get the source text of a token.
 fn token_text<'a>(source: &'a str, token: &crate::upstream::syn::token::Token) -> &'a str {
 	let start = token.span.offset as usize;
 	let end = (token.span.offset + token.span.len) as usize;
@@ -497,20 +467,17 @@ fn token_text<'a>(source: &'a str, token: &crate::upstream::syn::token::Token) -
 fn expr_to_string(expr: &crate::Expr) -> String {
 	let mut s = String::new();
 	expr.fmt_sql(&mut s, SqlFormat::SingleLine);
-	// Strip backtick/bracket escaping for clean lookup keys
 	s.trim_matches('`')
 		.trim_matches('⟨')
 		.trim_matches('⟩')
 		.to_string()
 }
 
-/// Extract table names from record link types (e.g., `record<user>` → `["user"]`).
 fn extract_record_links(kind: &crate::Kind) -> Vec<String> {
 	let mut s = String::new();
 	kind.fmt_sql(&mut s, SqlFormat::SingleLine);
 
 	let mut links = Vec::new();
-	// Parse record<table1 | table2> patterns from the formatted string
 	let mut remaining = s.as_str();
 	while let Some(pos) = remaining.find("record<") {
 		let after = &remaining[pos + 7..];

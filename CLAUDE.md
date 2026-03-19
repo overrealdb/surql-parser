@@ -1,5 +1,36 @@
 # CLAUDE.md
 
+# Code Quality Rules (MANDATORY)
+
+## Naming
+- NEVER use: helper, utils, handler, manager, misc, data, info, process
+- Every function/class name must describe WHAT it does, not its role
+- If you can't name it specifically, the abstraction is wrong
+
+## Error Handling
+- NEVER swallow errors with empty catch/except blocks
+- NEVER add silent default fallback values (?? 'default', || [])
+- If a value can be undefined, either: throw, handle explicitly, or 
+  document WHY a default is safe here
+- Every catch block must: handle meaningfully, log+rethrow, or have 
+  a comment explaining why swallowing is intentional
+
+## Testing
+- Write failing tests BEFORE implementation (TDD)
+- Tests must verify BEHAVIOR through public interfaces, not implementation
+- Every test name describes the scenario: "should_reject_expired_tokens"
+- No tests that could pass if the feature is broken
+- Test edge cases: null, empty, negative, concurrent, boundary values
+
+## Before Stopping
+- Run the test suite. Do not claim "done" with failing tests.
+- Review your own changes for the patterns listed above
+- Mention any shortcuts, technical debt, or known issues proactively
+
+## Compact Instructions
+When compacting, preserve: all file paths modified, architectural decisions 
+with rationale, any error messages encountered, and the current task status.
+
 ## Testing
 - ALWAYS write tests for new public functions
 - ALWAYS run `cargo test` before committing
