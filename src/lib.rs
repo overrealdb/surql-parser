@@ -32,6 +32,8 @@ pub mod build;
 )]
 pub mod upstream;
 
+pub mod schema_graph;
+
 // ─── Public API ───
 
 /// Parse a SurrealQL query string into an AST.
@@ -323,6 +325,99 @@ fn scan_params(input: &str) -> Vec<String> {
 	params.into_iter().collect()
 }
 
+// ─── Diagnostics ───
+
+/// A parse diagnostic with source location.
+#[derive(Debug, Clone)]
+pub struct ParseDiagnostic {
+	pub message: String,
+	/// 1-indexed line number.
+	pub line: usize,
+	/// 1-indexed column number (in chars).
+	pub column: usize,
+	/// 1-indexed end line number.
+	pub end_line: usize,
+	/// 1-indexed end column number.
+	pub end_column: usize,
+}
+
+/// Parse SurrealQL and return structured diagnostics on error.
+///
+/// Unlike [`parse()`], this function returns diagnostics with precise
+/// source positions suitable for LSP and IDE integration.
+///
+/// # Example
+///
+/// ```
+/// let result = surql_parser::parse_for_diagnostics("SELEC * FROM user");
+/// assert!(result.is_err());
+/// let diags = result.unwrap_err();
+/// assert!(!diags.is_empty());
+/// assert_eq!(diags[0].line, 1);
+/// ```
+pub fn parse_for_diagnostics(input: &str) -> Result<Ast, Vec<ParseDiagnostic>> {
+	use upstream::syn::error::Location;
+	use upstream::syn::token::Span;
+
+	let bytes = input.as_bytes();
+	if bytes.len() > u32::MAX as usize {
+		return Err(vec![ParseDiagnostic {
+			message: "Query too large".into(),
+			line: 1,
+			column: 1,
+			end_line: 1,
+			end_column: 1,
+		}]);
+	}
+
+	let settings = upstream::syn::settings_from_capabilities(&compat::Capabilities::all());
+	let mut parser = upstream::syn::parser::Parser::new_with_settings(bytes, settings);
+	let mut stack = reblessive::Stack::new();
+
+	match stack.enter(|stk| parser.parse_query(stk)).finish() {
+		Ok(ast) => Ok(ast),
+		Err(syntax_error) => {
+			// Collect spans from the error chain
+			let mut spans: Vec<Span> = Vec::new();
+			let err = syntax_error.update_spans(|span| {
+				spans.push(*span);
+			});
+
+			// Get rendered error messages
+			let rendered = err.render_on(input);
+
+			let message = rendered.errors.join(": ");
+
+			let mut diags: Vec<ParseDiagnostic> = spans
+				.iter()
+				.map(|span| {
+					let range = Location::range_of_span(input, *span);
+					ParseDiagnostic {
+						message: message.clone(),
+						line: range.start.line,
+						column: range.start.column,
+						end_line: range.end.line,
+						end_column: range.end.column,
+					}
+				})
+				.collect();
+
+			// If no spans but there are error messages, create a fallback diagnostic
+			if diags.is_empty() && !message.is_empty() {
+				diags.push(ParseDiagnostic {
+					message,
+					line: 1,
+					column: 1,
+					end_line: 1,
+					end_column: 1,
+				});
+			}
+
+			Err(diags)
+		}
+	}
+}
+
 // ─── Re-exports ───
 
 /// The parsed AST (list of top-level statements).
@@ -345,3 +440,5 @@ pub use upstream::sql::statements;
 
 /// Syntax error type.
 pub use upstream::syn::error;
+
+pub use schema_graph::SchemaGraph;
