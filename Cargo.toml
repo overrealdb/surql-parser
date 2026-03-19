@@ -1,5 +1,6 @@
 [workspace]
 members = [".", "tools/transform", "macros", "examples/sample-project", "lsp"]
+exclude = ["editors/zed"]
 
 [package]
 name = "surql-parser"

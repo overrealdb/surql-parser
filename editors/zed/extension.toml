@@ -9,3 +9,7 @@ repository = "https://github.com/overrealdb/surql-parser"
 [grammars.surrealql]
 repository = "https://github.com/Ce11an/tree-sitter-surrealql"
 commit = "07bf1704b91eeec6b001e2e0d29a4d7f03a01af9"
+
+[language_servers.surql-lsp]
+name = "surql-lsp"
+languages = ["SurrealQL"]
