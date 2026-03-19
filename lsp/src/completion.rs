@@ -6,7 +6,8 @@ use tower_lsp::lsp_types::{CompletionItem, CompletionItemKind, Position};
 use crate::keywords::KEYWORDS;
 
 /// Context detected at cursor position.
-enum Context {
+#[derive(Debug, PartialEq)]
+pub(crate) enum Context {
 	/// After FROM, INTO, ON — suggest table names.
 	TableName,
 	/// After `fn::` — suggest function names.
@@ -116,7 +117,7 @@ fn keyword_completions() -> Vec<CompletionItem> {
 }
 
 /// Detect the completion context by scanning backwards from cursor.
-fn detect_context(source: &str, position: Position) -> Context {
+pub(crate) fn detect_context(source: &str, position: Position) -> Context {
 	let line_idx = position.line as usize;
 	let col = position.character as usize;
 
@@ -140,12 +141,27 @@ fn detect_context(source: &str, position: Position) -> Context {
 	}
 
 	// After FROM, INTO, ON — table completion
-	let upper = trimmed.to_uppercase();
-	for keyword in &[
-		"FROM ", "INTO ", "ON ", "TABLE ", "FROM\t", "INTO\t", "ON\t",
-	] {
-		if upper.ends_with(keyword) {
+	// Check both the raw before_cursor (may end with space) and trimmed version
+	let upper_raw = before_cursor.to_uppercase();
+	let upper_trimmed = trimmed.to_uppercase();
+	for keyword in &["FROM", "INTO", "ON", "TABLE"] {
+		// "FROM " with cursor after space, or "FROM\t"
+		if upper_raw.ends_with(&format!("{keyword} "))
+			|| upper_raw.ends_with(&format!("{keyword}\t"))
+		{
 			return Context::TableName;
+		}
+		// Just typed "FROM" with cursor right after (no space yet)
+		if upper_trimmed.ends_with(keyword) {
+			// Only if it's a word boundary (not part of a longer word)
+			let prefix = &upper_trimmed[..upper_trimmed.len() - keyword.len()];
+			if prefix.is_empty()
+				|| prefix.ends_with(' ')
+				|| prefix.ends_with('\t')
+				|| prefix.ends_with(';')
+			{
+				return Context::TableName;
+			}
 		}
 	}
 

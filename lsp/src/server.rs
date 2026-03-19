@@ -233,7 +233,7 @@ impl LanguageServer for Backend {
 }
 
 /// Extract the word (identifier) at a cursor position.
-fn word_at_position(source: &str, position: Position) -> String {
+pub(crate) fn word_at_position(source: &str, position: Position) -> String {
 	let line = match source.lines().nth(position.line as usize) {
 		Some(l) => l,
 		None => return String::new(),

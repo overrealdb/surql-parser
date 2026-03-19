@@ -7,6 +7,9 @@ mod formatting;
 mod keywords;
 mod server;
 
+#[cfg(test)]
+mod tests;
+
 use tower_lsp::{LspService, Server};
 use tracing_subscriber::EnvFilter;
 
