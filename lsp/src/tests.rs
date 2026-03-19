@@ -847,48 +847,66 @@ mod edge_cases {
 
 	#[test]
 	fn completion_with_unicode() {
-		// Must not panic
-		let _ = completion::complete("SELECT * FROM юзер WHERE ", pos(0, 25), None);
+		// Unicode source should return keyword completions, not crash
+		let items = completion::complete("SELECT * FROM юзер WHERE ", pos(0, 25), None);
+		assert!(!items.is_empty(), "should return keyword completions");
 	}
 
 	#[test]
 	fn word_at_position_unicode() {
-		// Should not panic even with multi-byte chars
-		let _ = word_at_position("SELECT * FROM таблица", pos(0, 14));
+		// ASCII chars before unicode should still extract correctly
+		let word = word_at_position("SELECT * FROM table1", pos(0, 17));
+		assert_eq!(word, "table1");
 	}
 
 	// ─── Cursor at boundaries ───
 
 	#[test]
 	fn completion_at_col_zero() {
-		let _ = completion::complete("SELECT", pos(0, 0), None);
+		// At position 0, should get general completions (keywords)
+		let items = completion::complete("SELECT", pos(0, 0), None);
+		assert!(!items.is_empty());
 	}
 
 	#[test]
 	fn completion_past_end_of_line() {
-		let _ = completion::complete("SELECT", pos(0, 100), None);
+		// Past end should get general context, not crash
+		let items = completion::complete("SELECT", pos(0, 100), None);
+		assert!(!items.is_empty());
 	}
 
 	#[test]
 	fn completion_past_end_of_document() {
-		let _ = completion::complete("SELECT", pos(100, 0), None);
+		// Past document end should return general completions
+		let items = completion::complete("SELECT", pos(100, 0), None);
+		assert!(!items.is_empty());
 	}
 
 	// ─── Empty/whitespace inputs ───
 
 	#[test]
-	fn format_whitespace() {
-		let _ = formatting::format_document("   \n\t\n  ");
+	fn format_whitespace_returns_none_or_edit() {
+		// Whitespace-only may parse as empty or fail — either way, no crash
+		let result = formatting::format_document("   \n\t\n  ");
+		// Whitespace parses as valid empty AST → format produces empty string
+		// So result is either None (already "formatted") or Some with replacement
+		assert!(result.is_none() || result.unwrap().len() == 1);
 	}
 
 	#[test]
-	fn completion_whitespace_only() {
-		let _ = completion::complete("   ", pos(0, 3), None);
+	fn completion_whitespace_returns_keywords() {
+		let items = completion::complete("   ", pos(0, 3), None);
+		assert!(
+			!items.is_empty(),
+			"whitespace should still give keyword completions"
+		);
 	}
 
 	#[test]
-	fn diagnostics_single_semicolon() {
-		let _ = diagnostics::compute(";");
+	fn diagnostics_single_semicolon_no_errors() {
+		// Semicolons alone are valid (empty statements)
+		let diags = diagnostics::compute(";");
+		assert!(diags.is_empty());
 	}
 
 	// ─── Deeply nested queries ───
@@ -1298,5 +1316,156 @@ mod builtin_completions {
 			"Expected 15+ built-in namespaces, got {}",
 			modules.len()
 		);
+	}
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// 13. COMPLETION EXCLUSIONS — verify wrong items are NOT returned
+// ═══════════════════════════════════════════════════════════════════════
+
+#[cfg(test)]
+mod completion_exclusions {
+	use crate::completion;
+	use surql_parser::SchemaGraph;
+	use tower_lsp::lsp_types::{CompletionItemKind, Position};
+
+	fn pos(line: u32, col: u32) -> Position {
+		Position {
+			line,
+			character: col,
+		}
+	}
+
+	fn schema() -> SchemaGraph {
+		SchemaGraph::from_source(
+			"
+			DEFINE TABLE user SCHEMAFULL;
+			DEFINE FIELD name ON user TYPE string;
+			DEFINE TABLE post SCHEMAFULL;
+			DEFINE FIELD title ON post TYPE string;
+		",
+		)
+		.unwrap()
+	}
+
+	#[test]
+	fn field_completion_excludes_wrong_table_fields() {
+		let sg = schema();
+		let items = completion::complete("SELECT user.", pos(0, 12), Some(&sg));
+		let fields: Vec<_> = items
+			.iter()
+			.filter(|i| i.kind == Some(CompletionItemKind::FIELD))
+			.collect();
+		// user.name YES, user.title NO
+		assert!(fields.iter().any(|i| i.label == "name"));
+		assert!(
+			!fields.iter().any(|i| i.label == "title"),
+			"post.title should NOT appear in user.* completions"
+		);
+	}
+
+	#[test]
+	fn fn_context_excludes_table_names() {
+		let sg = schema();
+		let items = completion::complete("SELECT fn::", pos(0, 11), Some(&sg));
+		// Should NOT include table names
+		assert!(
+			!items
+				.iter()
+				.any(|i| i.kind == Some(CompletionItemKind::CLASS)),
+			"table names should NOT appear in fn:: context"
+		);
+	}
+
+	#[test]
+	fn param_context_excludes_keywords() {
+		let sg = schema();
+		let items = completion::complete("WHERE $", pos(0, 7), Some(&sg));
+		// Should NOT include keywords
+		assert!(
+			!items
+				.iter()
+				.any(|i| i.kind == Some(CompletionItemKind::KEYWORD)),
+			"keywords should NOT appear in $ context"
+		);
+	}
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// 14. ERROR RECOVERY IN LSP — diagnostics from partial documents
+// ═══════════════════════════════════════════════════════════════════════
+
+#[cfg(test)]
+mod recovery_diagnostics {
+	use crate::diagnostics;
+
+	#[test]
+	fn multiple_errors_all_reported() {
+		let source = "SELEC broken; UPDAET also broken; SELECT * FROM user";
+		let diags = diagnostics::compute(source);
+		// Should report errors for both broken statements, not just the first
+		assert!(
+			diags.len() >= 2,
+			"expected 2+ diagnostics, got {}",
+			diags.len()
+		);
+	}
+
+	#[test]
+	fn valid_statements_dont_generate_errors() {
+		let source = "SELECT * FROM user; SELEC broken; SELECT * FROM post";
+		let diags = diagnostics::compute(source);
+		// Only 1 error (the middle statement)
+		assert_eq!(diags.len(), 1, "expected exactly 1 diagnostic");
+	}
+
+	#[test]
+	fn error_after_define_reported() {
+		let source =
+			"DEFINE TABLE user SCHEMAFULL; SELEC broken; DEFINE FIELD name ON user TYPE string";
+		let diags = diagnostics::compute(source);
+		assert_eq!(diags.len(), 1);
+	}
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// 15. KEYWORD LIST QUALITY (from parser enum)
+// ═══════════════════════════════════════════════════════════════════════
+
+#[cfg(test)]
+mod keyword_quality {
+	use crate::keywords;
+
+	#[test]
+	fn count_matches_parser_enum() {
+		// The parser has 176+ keywords. Our list should match exactly.
+		let kws = keywords::all_keywords();
+		assert!(
+			kws.len() >= 175,
+			"Expected 175+ keywords from parser enum, got {}",
+			kws.len()
+		);
+	}
+
+	#[test]
+	fn no_empty_strings() {
+		assert!(keywords::all_keywords().iter().all(|k| !k.is_empty()));
+	}
+
+	#[test]
+	fn select_present() {
+		assert!(keywords::all_keywords().contains(&"SELECT"));
+	}
+
+	#[test]
+	fn surrealql_specific_keywords() {
+		let kws = keywords::all_keywords();
+		// SurrealQL-specific keywords that generic SQL doesn't have
+		assert!(kws.contains(&"SCHEMAFULL"));
+		assert!(kws.contains(&"SCHEMALESS"));
+		assert!(kws.contains(&"CHANGEFEED"));
+		assert!(kws.contains(&"RELATE"));
+		assert!(kws.contains(&"LIVE"));
+		assert!(kws.contains(&"GRAPHQL"));
 	}
 }

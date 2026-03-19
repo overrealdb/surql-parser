@@ -139,38 +139,125 @@ impl SchemaGraph {
 		Ok(())
 	}
 
-	/// Scan source text for DEFINE keywords and attach byte offsets to graph entries.
+	/// Scan source text via the lexer for DEFINE statement positions.
+	///
+	/// Uses the actual token stream, so it correctly skips strings and comments
+	/// (unlike the previous string-search approach).
 	fn attach_source_locations(&mut self, source: &str, file: &Path) {
-		let upper = source.to_uppercase();
-		let file = file.to_path_buf();
+		use crate::upstream::syn::lexer::Lexer;
+		use crate::upstream::syn::token::TokenKind;
 
-		// Find DEFINE TABLE locations
-		for table in self.tables.values_mut() {
-			if table.source.is_some() {
-				continue;
-			}
-			let search = format!("DEFINE TABLE {}", table.name.to_uppercase());
-			if let Some(offset) = upper.find(&search) {
-				table.source = Some(SourceLocation {
-					file: file.clone(),
-					offset,
-					len: search.len(),
-				});
-			}
+		let bytes = source.as_bytes();
+		if bytes.len() > u32::MAX as usize {
+			return;
 		}
 
-		// Find DEFINE FUNCTION locations
-		for func in self.functions.values_mut() {
-			if func.source.is_some() {
+		let tokens: Vec<_> = Lexer::new(bytes).collect();
+		let file = file.to_path_buf();
+
+		for i in 0..tokens.len() {
+			// Look for DEFINE keyword
+			let define_token = &tokens[i];
+			let define_text = token_text(source, define_token);
+			if define_text.to_uppercase() != "DEFINE" {
 				continue;
 			}
-			let search = format!("DEFINE FUNCTION FN::{}", func.name.to_uppercase());
-			if let Some(offset) = upper.find(&search) {
-				func.source = Some(SourceLocation {
-					file: file.clone(),
-					offset,
-					len: search.len(),
-				});
+
+			// Skip OVERWRITE/IF NOT EXISTS
+			let mut j = i + 1;
+			while j < tokens.len() {
+				let t = token_text(source, &tokens[j]).to_uppercase();
+				if t == "OVERWRITE" || t == "IF" || t == "NOT" || t == "EXISTS" {
+					j += 1;
+				} else {
+					break;
+				}
+			}
+
+			if j >= tokens.len() {
+				continue;
+			}
+
+			let kind_token = &tokens[j];
+			let kind_text = token_text(source, kind_token).to_uppercase();
+
+			// DEFINE TABLE <name>
+			if kind_text == "TABLE" && j + 1 < tokens.len() {
+				let name_token = &tokens[j + 1];
+				let name = token_text(source, name_token);
+				if let Some(table) = self.tables.get_mut(name).filter(|t| t.source.is_none()) {
+					table.source = Some(SourceLocation {
+						file: file.clone(),
+						offset: define_token.span.offset as usize,
+						len: (name_token.span.offset + name_token.span.len
+							- define_token.span.offset) as usize,
+					});
+				}
+			}
+
+			// DEFINE FUNCTION fn::<name>
+			if kind_text == "FUNCTION" && j + 1 < tokens.len() {
+				// After FUNCTION, there's fn :: name or just the function identifier
+				// Scan forward to collect the full function path
+				let fn_start = j + 1;
+				let mut fn_end = fn_start;
+				while fn_end < tokens.len() {
+					let tk = tokens[fn_end].kind;
+					if tk == TokenKind::Identifier
+						|| tk == TokenKind::PathSeperator
+						|| matches!(tk, TokenKind::Keyword(_))
+					{
+						fn_end += 1;
+					} else {
+						break;
+					}
+				}
+				if fn_end > fn_start {
+					// Reconstruct function name from tokens
+					let name_start = tokens[fn_start].span.offset as usize;
+					let name_end =
+						(tokens[fn_end - 1].span.offset + tokens[fn_end - 1].span.len) as usize;
+					let full_name = &source[name_start..name_end];
+					let fn_name = full_name.strip_prefix("fn::").unwrap_or(full_name);
+					if let Some(func) = self
+						.functions
+						.get_mut(fn_name)
+						.filter(|f| f.source.is_none())
+					{
+						func.source = Some(SourceLocation {
+							file: file.clone(),
+							offset: define_token.span.offset as usize,
+							len: name_end - define_token.span.offset as usize,
+						});
+					}
+				}
+			}
+
+			// DEFINE FIELD <name> ON <table>
+			if kind_text == "FIELD" && j + 1 < tokens.len() {
+				let name_token = &tokens[j + 1];
+				let field_name = token_text(source, name_token);
+				// Find ON keyword to get the table name
+				for k in (j + 2)..tokens.len().min(j + 6) {
+					if token_text(source, &tokens[k]).to_uppercase() == "ON" && k + 1 < tokens.len()
+					{
+						let table_name = token_text(source, &tokens[k + 1]);
+						if let Some(table) = self.tables.get_mut(table_name) {
+							for field in &mut table.fields {
+								if field.name == field_name && field.source.is_none() {
+									field.source = Some(SourceLocation {
+										file: file.clone(),
+										offset: define_token.span.offset as usize,
+										len: (tokens[(k + 1).min(tokens.len() - 1)].span.offset
+											+ tokens[(k + 1).min(tokens.len() - 1)].span.len
+											- define_token.span.offset) as usize,
+									});
+								}
+							}
+						}
+						break;
+					}
+				}
 			}
 		}
 	}
@@ -395,6 +482,17 @@ impl SchemaGraph {
 }
 
 // ─── Helpers ───
+
+/// Get the source text of a token.
+fn token_text<'a>(source: &'a str, token: &crate::upstream::syn::token::Token) -> &'a str {
+	let start = token.span.offset as usize;
+	let end = (token.span.offset + token.span.len) as usize;
+	if end <= source.len() {
+		&source[start..end]
+	} else {
+		""
+	}
+}
 
 fn expr_to_string(expr: &crate::Expr) -> String {
 	let mut s = String::new();
