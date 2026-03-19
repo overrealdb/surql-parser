@@ -1,0 +1,10 @@
+error: Invalid SurrealQL: Invalid query: Unexpected token `USER`, expected Eof
+ --> [1:14]
+  |
+1 | SELEC * FORM user
+  |              ^^^^
+
+ --> tests/ui/fail_query_invalid_sql.rs:4:26
+  |
+4 |     let _sql = surql_query!("SELEC * FORM user");
+  |                             ^^^^^^^^^^^^^^^^^^^

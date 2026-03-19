@@ -1,0 +1,5 @@
+error: missing parameter `name` — query uses $name but it was not provided
+ --> tests/ui/fail_query_missing_param.rs:5:26
+  |
+5 |     let _sql = surql_query!("SELECT * FROM user WHERE age > $min AND name = $name", min);
+  |                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
