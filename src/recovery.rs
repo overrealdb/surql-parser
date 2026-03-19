@@ -42,35 +42,21 @@ pub fn parse_with_recovery(source: &str) -> (Vec<TopLevelExpr>, Vec<ParseDiagnos
 			continue;
 		}
 
-		match crate::parse(chunk_source) {
+		// Single parse — parse_for_diagnostics returns AST on success, structured errors on failure
+		match crate::parse_for_diagnostics(chunk_source) {
 			Ok(ast) => {
 				all_stmts.extend(ast.expressions);
 			}
-			Err(_) => {
-				// Try parse_for_diagnostics for precise error info
-				if let Err(diags) = crate::parse_for_diagnostics(chunk_source) {
-					for mut d in diags {
-						// Adjust line/column offsets for the chunk position in the original source
-						let (base_line, base_col) = byte_offset_to_line_col(source, chunk.start);
-						if d.line == 1 {
-							d.column += base_col;
-							d.end_column += base_col;
-						}
-						d.line += base_line;
-						d.end_line += base_line;
-						all_diags.push(d);
+			Err(diags) => {
+				let (base_line, base_col) = byte_offset_to_line_col(source, chunk.start);
+				for mut d in diags {
+					if d.line == 1 {
+						d.column += base_col;
+						d.end_column += base_col;
 					}
-				} else {
-					// parse failed but parse_for_diagnostics succeeded? Shouldn't happen.
-					// Add a generic diagnostic.
-					let (line, col) = byte_offset_to_line_col(source, chunk.start);
-					all_diags.push(ParseDiagnostic {
-						message: "Parse error".into(),
-						line: line + 1,
-						column: col + 1,
-						end_line: line + 1,
-						end_column: col + 1,
-					});
+					d.line += base_line;
+					d.end_line += base_line;
+					all_diags.push(d);
 				}
 			}
 		}
@@ -119,7 +105,6 @@ fn split_into_chunks(source: &str) -> Vec<Chunk> {
 		}
 	}
 
-	// Last chunk (after final semicolon or if no semicolons)
 	if chunk_start < source.len() {
 		let remaining = source[chunk_start..].trim();
 		if !remaining.is_empty() {
@@ -130,7 +115,6 @@ fn split_into_chunks(source: &str) -> Vec<Chunk> {
 		}
 	}
 
-	// If no semicolons found, treat entire source as one chunk
 	if chunks.is_empty() && !source.trim().is_empty() {
 		chunks.push(Chunk {
 			start: 0,

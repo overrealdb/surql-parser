@@ -14,7 +14,7 @@
 
 (define_function_statement
   (keyword_function)
-  (identifier) @name) @item
+  (custom_function_name) @name) @item
 
 (define_event_statement
   (keyword_event)
@@ -38,4 +38,4 @@
 
 (define_param_statement
   (keyword_param)
-  (param) @name) @item
+  (variable_name) @name) @item

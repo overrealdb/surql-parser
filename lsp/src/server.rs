@@ -33,15 +33,22 @@ impl Backend {
 
 	/// Rebuild the workspace schema graph from all .surql files.
 	fn rebuild_schema(&self) {
-		let root = self.workspace_root.read().ok().and_then(|r| r.clone());
+		let root = match self.workspace_root.read() {
+			Ok(r) => r.clone(),
+			Err(e) => {
+				tracing::error!("workspace_root lock poisoned: {e}");
+				return;
+			}
+		};
 		if let Some(root) = root {
 			match SchemaGraph::from_files(&root) {
-				Ok(sg) => {
-					if let Ok(mut schema) = self.schema.write() {
+				Ok(sg) => match self.schema.write() {
+					Ok(mut schema) => {
 						*schema = sg;
+						tracing::info!("Schema graph rebuilt from {}", root.display());
 					}
-					tracing::info!("Schema graph rebuilt from {}", root.display());
-				}
+					Err(e) => tracing::error!("schema lock poisoned: {e}"),
+				},
 				Err(e) => {
 					tracing::warn!("Failed to rebuild schema: {e}");
 				}
@@ -49,18 +56,9 @@ impl Backend {
 		}
 	}
 
-	/// Parse document with recovery, publish diagnostics, and update document schema.
 	async fn publish_diagnostics(&self, uri: Url) {
 		if let Some(source) = self.documents.get(&uri) {
 			let result = diagnostics::compute_with_recovery(&source);
-
-			// Build schema from successfully parsed statements in this document
-			// This allows completions/hover to work even when parts are broken
-			if let Ok(defs) = surql_parser::extract_definitions_from_ast(&result.statements) {
-				// Merge into workspace schema (document-level definitions)
-				// TODO: track per-document schema for proper invalidation
-				let _ = defs; // For now, workspace schema from files is sufficient
-			}
 
 			self.client
 				.publish_diagnostics(uri, result.diagnostics, None)
@@ -157,7 +155,11 @@ impl LanguageServer for Backend {
 			Some(s) => s,
 			None => return Ok(None),
 		};
-		let schema = self.schema.read().ok();
+		let schema = self
+			.schema
+			.read()
+			.map_err(|e| tracing::warn!("schema lock poisoned: {e}"))
+			.ok();
 		let items = completion::complete(&source, position, schema.as_deref());
 		Ok(Some(CompletionResponse::Array(items)))
 	}
@@ -169,7 +171,11 @@ impl LanguageServer for Backend {
 			Some(s) => s,
 			None => return Ok(None),
 		};
-		let schema = self.schema.read().ok();
+		let schema = self
+			.schema
+			.read()
+			.map_err(|e| tracing::warn!("schema lock poisoned: {e}"))
+			.ok();
 		let schema = schema.as_deref();
 
 		// Find the word at cursor
@@ -246,7 +252,11 @@ impl LanguageServer for Backend {
 			Some(s) => s,
 			None => return Ok(None),
 		};
-		let schema = self.schema.read().ok();
+		let schema = self
+			.schema
+			.read()
+			.map_err(|e| tracing::warn!("schema lock poisoned: {e}"))
+			.ok();
 		Ok(signature::signature_help(
 			&source,
 			position,
@@ -270,7 +280,11 @@ impl LanguageServer for Backend {
 			return Ok(None);
 		}
 
-		let schema = self.schema.read().ok();
+		let schema = self
+			.schema
+			.read()
+			.map_err(|e| tracing::warn!("schema lock poisoned: {e}"))
+			.ok();
 		let schema = match schema.as_deref() {
 			Some(sg) => sg,
 			None => return Ok(None),
