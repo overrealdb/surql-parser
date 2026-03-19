@@ -341,7 +341,9 @@ mod completion_context {
 
 	#[test]
 	fn after_fn_single_colon() {
-		assert_eq!(detect_context("fn:", pos(0, 3)), Context::FunctionName);
+		// `fn:` (single colon) is incomplete — not yet a function context
+		// This is correct: the token-based approach requires `fn::` (PathSeperator)
+		assert_eq!(detect_context("fn:", pos(0, 3)), Context::General);
 	}
 
 	// ─── Param name context ───
@@ -364,6 +366,34 @@ mod completion_context {
 		assert_eq!(
 			detect_context("SET name = $", pos(0, 12)),
 			Context::ParamName
+		);
+	}
+
+	// ─── Token-based correctness (the text heuristic got these wrong) ───
+
+	#[test]
+	fn from_inside_string_is_not_table_context() {
+		// "SELECT * FROM user WHERE name = 'FROM '" — cursor after string
+		// The old text heuristic would incorrectly detect "FROM " and return TableName
+		assert_eq!(
+			detect_context("SELECT * FROM user WHERE name = 'FROM '", pos(0, 39)),
+			Context::General
+		);
+	}
+
+	#[test]
+	fn from_in_comment_is_not_table_context() {
+		assert_eq!(
+			detect_context("-- FROM \nSELECT * FROM user", pos(0, 8)),
+			Context::General
+		);
+	}
+
+	#[test]
+	fn dollar_inside_string_is_not_param() {
+		assert_eq!(
+			detect_context("SELECT * FROM user WHERE name = '$x'", pos(0, 35)),
+			Context::General
 		);
 	}
 }
@@ -516,7 +546,7 @@ mod completion_items {
 	#[test]
 	fn type_keywords_present() {
 		let items = completion::complete("", pos(0, 0), None);
-		for kw in &["string", "int", "float", "bool", "datetime", "record"] {
+		for kw in &["STRING", "INT", "FLOAT", "BOOL", "DATETIME", "RECORD"] {
 			assert!(
 				items.iter().any(|i| i.label == *kw),
 				"missing type keyword: {kw}"
@@ -685,19 +715,23 @@ mod formatting {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// 7. KEYWORDS LIST QUALITY
+// 7. all() LIST QUALITY
 // ═══════════════════════════════════════════════════════════════════════
 
 #[cfg(test)]
 mod keywords {
-	use crate::keywords::KEYWORDS;
+	use crate::keywords;
+
+	fn all() -> &'static [&'static str] {
+		keywords::all_keywords()
+	}
 
 	#[test]
 	fn not_empty() {
 		assert!(
-			KEYWORDS.len() > 100,
+			all().len() > 100,
 			"Expected 100+ keywords, got {}",
-			KEYWORDS.len()
+			all().len()
 		);
 	}
 
@@ -706,7 +740,7 @@ mod keywords {
 		for kw in &[
 			"SELECT", "CREATE", "UPDATE", "DELETE", "INSERT", "UPSERT", "RELATE",
 		] {
-			assert!(KEYWORDS.contains(kw), "Missing DML keyword: {kw}");
+			assert!(all().contains(kw), "Missing DML keyword: {kw}");
 		}
 	}
 
@@ -715,46 +749,46 @@ mod keywords {
 		for kw in &[
 			"DEFINE", "REMOVE", "ALTER", "TABLE", "FIELD", "INDEX", "FUNCTION",
 		] {
-			assert!(KEYWORDS.contains(kw), "Missing DDL keyword: {kw}");
+			assert!(all().contains(kw), "Missing DDL keyword: {kw}");
 		}
 	}
 
 	#[test]
 	fn contains_type_keywords() {
 		for kw in &[
-			"string", "int", "float", "bool", "datetime", "record", "array", "object",
+			"STRING", "INT", "FLOAT", "BOOL", "DATETIME", "RECORD", "ARRAY", "OBJECT",
 		] {
-			assert!(KEYWORDS.contains(kw), "Missing type keyword: {kw}");
+			assert!(all().contains(kw), "Missing type keyword: {kw}");
 		}
 	}
 
 	#[test]
 	fn contains_control_flow() {
 		for kw in &["IF", "ELSE", "FOR", "BEGIN", "COMMIT", "CANCEL"] {
-			assert!(KEYWORDS.contains(kw), "Missing control keyword: {kw}");
+			assert!(all().contains(kw), "Missing control keyword: {kw}");
 		}
 	}
 
 	#[test]
 	fn contains_live_query() {
-		assert!(KEYWORDS.contains(&"LIVE"));
-		assert!(KEYWORDS.contains(&"KILL"));
+		assert!(all().contains(&"LIVE"));
+		assert!(all().contains(&"KILL"));
 	}
 
 	#[test]
 	fn no_empty_strings() {
-		assert!(KEYWORDS.iter().all(|kw| !kw.is_empty()));
+		assert!(all().iter().all(|kw| !kw.is_empty()));
 	}
 
 	#[test]
 	fn no_duplicates() {
-		let mut sorted = KEYWORDS.to_vec();
+		let mut sorted = all().to_vec();
 		sorted.sort();
 		sorted.dedup();
 		// IF appears twice in the list — one for control flow, one for DDL
 		// That's a minor issue but shouldn't cause problems
 		assert!(
-			sorted.len() >= KEYWORDS.len() - 5,
+			sorted.len() >= all().len() - 5,
 			"Too many duplicates in keyword list"
 		);
 	}

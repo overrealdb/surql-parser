@@ -3,7 +3,7 @@
 use surql_parser::SchemaGraph;
 use tower_lsp::lsp_types::{CompletionItem, CompletionItemKind, InsertTextFormat, Position};
 
-use crate::keywords::KEYWORDS;
+use crate::keywords;
 
 /// Context detected at cursor position.
 #[derive(Debug, PartialEq)]
@@ -172,7 +172,7 @@ pub fn complete(
 }
 
 fn keyword_completions() -> Vec<CompletionItem> {
-	KEYWORDS
+	keywords::all_keywords()
 		.iter()
 		.map(|kw| CompletionItem {
 			label: kw.to_string(),
@@ -182,75 +182,98 @@ fn keyword_completions() -> Vec<CompletionItem> {
 		.collect()
 }
 
-/// Detect the completion context by scanning backwards from cursor.
+/// Detect the completion context using the lexer's token stream.
+///
+/// This is correct even for tokens inside strings/comments (the lexer handles
+/// those properly), unlike text-heuristic approaches.
 pub(crate) fn detect_context(source: &str, position: Position) -> Context {
-	let line_idx = position.line as usize;
-	let col = position.character as usize;
+	use surql_parser::upstream::syn::lexer::Lexer;
+	use surql_parser::upstream::syn::token::TokenKind;
 
-	let line = source.lines().nth(line_idx).unwrap_or("");
-	let before_cursor = if col <= line.len() {
-		&line[..col]
-	} else {
-		line
-	};
+	let byte_offset = position_to_byte_offset(source, position);
+	let bytes = source.as_bytes();
+	if bytes.is_empty() || bytes.len() > u32::MAX as usize {
+		return Context::General;
+	}
 
-	let trimmed = before_cursor.trim_end();
+	// Tokenize everything up to cursor
+	let lexer = Lexer::new(bytes);
+	let tokens: Vec<_> = lexer
+		.take_while(|t| (t.span.offset as usize) < byte_offset)
+		.collect();
 
-	// After $ — param completion
-	if trimmed.ends_with('$') || before_cursor.ends_with('$') {
+	if tokens.is_empty() {
+		return Context::General;
+	}
+
+	let last = tokens.last().unwrap();
+	let last_end = last.span.offset as usize + last.span.len as usize;
+
+	/// Get the source text of a token.
+	fn token_text<'a>(
+		source: &'a str,
+		token: &surql_parser::upstream::syn::token::Token,
+	) -> &'a str {
+		let start = token.span.offset as usize;
+		let end = (token.span.offset + token.span.len) as usize;
+		if end <= source.len() {
+			&source[start..end]
+		} else {
+			""
+		}
+	}
+
+	// Cursor is right after a `$param` → param context
+	if last.kind == TokenKind::Parameter {
 		return Context::ParamName;
 	}
 
-	// After fn:: — function completion
-	if trimmed.ends_with("fn::") || trimmed.ends_with("fn:") {
-		return Context::FunctionName;
-	}
-
-	// After `identifier.` — field completion
-	if trimmed.ends_with('.') {
-		let before_dot = &trimmed[..trimmed.len() - 1];
-		let table_name = extract_last_identifier(before_dot);
-		if !table_name.is_empty() {
-			return Context::FieldName(table_name);
-		}
-	}
-
-	// After FROM, INTO, ON — table completion
-	let upper_raw = before_cursor.to_uppercase();
-	let upper_trimmed = trimmed.to_uppercase();
-	for keyword in &["FROM", "INTO", "ON", "TABLE"] {
-		if upper_raw.ends_with(&format!("{keyword} "))
-			|| upper_raw.ends_with(&format!("{keyword}\t"))
-		{
-			return Context::TableName;
-		}
-		if upper_trimmed.ends_with(keyword) {
-			let prefix = &upper_trimmed[..upper_trimmed.len() - keyword.len()];
-			if prefix.is_empty()
-				|| prefix.ends_with(' ')
-				|| prefix.ends_with('\t')
-				|| prefix.ends_with(';')
-			{
-				return Context::TableName;
+	// Cursor is right after `.` → field context
+	if last.kind == TokenKind::Dot {
+		if tokens.len() >= 2 {
+			let prev = &tokens[tokens.len() - 2];
+			if prev.kind == TokenKind::Identifier || matches!(prev.kind, TokenKind::Keyword(_)) {
+				return Context::FieldName(token_text(source, prev).to_string());
 			}
 		}
+	}
+
+	// Cursor is after last token (in whitespace/gap)
+	if last_end <= byte_offset {
+		let last_text = token_text(source, last).to_uppercase();
+		match last_text.as_str() {
+			"FROM" | "INTO" | "ON" | "TABLE" => return Context::TableName,
+			_ => {}
+		}
+
+		// After `fn::` — lexer emits Keyword(Fn) + PathSeperator
+		if last.kind == TokenKind::PathSeperator && tokens.len() >= 2 {
+			let prev_text = token_text(source, &tokens[tokens.len() - 2]).to_uppercase();
+			if prev_text == "FN" {
+				return Context::FunctionName;
+			}
+		}
+		if last_text == "FN" {
+			return Context::FunctionName;
+		}
+	}
+
+	// Fallback: cursor right after `$` in source
+	if byte_offset > 0 && byte_offset <= source.len() && bytes[byte_offset - 1] == b'$' {
+		return Context::ParamName;
 	}
 
 	Context::General
 }
 
-/// Extract the last identifier before a position (scanning backwards).
-fn extract_last_identifier(s: &str) -> String {
-	let bytes = s.as_bytes();
-	let end = bytes.len();
-	let start = (0..end)
-		.rev()
-		.take_while(|&i| bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_')
-		.last()
-		.unwrap_or(end);
-	if start < end {
-		s[start..end].to_string()
-	} else {
-		String::new()
+/// Convert an LSP Position (0-indexed line/col) to a byte offset.
+fn position_to_byte_offset(source: &str, position: Position) -> usize {
+	let mut offset = 0;
+	for (i, line) in source.lines().enumerate() {
+		if i == position.line as usize {
+			return offset + (position.character as usize).min(line.len());
+		}
+		offset += line.len() + 1; // +1 for \n
 	}
+	source.len()
 }
