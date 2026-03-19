@@ -1,11 +1,10 @@
-; Indent inside curly braces (code blocks)
-"{" @indent.start
-"}" @indent.end
+; Zed indent queries — use @indent/@outdent (not @indent.start/@indent.end)
 
-; Indent inside parentheses (e.g., subqueries or multi-line expressions)
-"(" @indent.start
-")" @indent.end
+("{" @indent)
+("}" @outdent)
 
-; Indent inside square brackets (e.g., multi-line array or set literals)
-"[" @indent.start
-"]" @indent.end
+("(" @indent)
+(")" @outdent)
+
+("[" @indent)
+("]" @outdent)
