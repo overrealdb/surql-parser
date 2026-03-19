@@ -4452,11 +4452,13 @@ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 name = "surql-lsp"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "dashmap 6.1.0",
  "serde",
  "serde_json",
  "surql-parser",
  "tokio",
+ "tokio-util",
  "tower-lsp",
  "tracing",
  "tracing-subscriber",

@@ -1,16 +1,5 @@
 //! SurrealQL Language Server — LSP implementation powered by surql-parser.
 
-mod completion;
-mod diagnostics;
-mod document;
-mod formatting;
-mod keywords;
-mod server;
-mod signature;
-
-#[cfg(test)]
-mod tests;
-
 use tower_lsp::{LspService, Server};
 use tracing_subscriber::EnvFilter;
 
@@ -24,7 +13,7 @@ async fn main() {
 	let stdin = tokio::io::stdin();
 	let stdout = tokio::io::stdout();
 
-	let (service, socket) = LspService::new(server::Backend::new);
+	let (service, socket) = LspService::new(surql_lsp::server::Backend::new);
 
 	Server::new(stdin, stdout, socket).serve(service).await;
 }
