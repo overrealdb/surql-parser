@@ -6,6 +6,7 @@ mod document;
 mod formatting;
 mod keywords;
 mod server;
+mod signature;
 
 #[cfg(test)]
 mod tests;

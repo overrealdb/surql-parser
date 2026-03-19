@@ -112,24 +112,67 @@ impl SchemaGraph {
 	}
 
 	/// Build a schema graph by walking all `.surql` files in a directory.
+	///
+	/// Source locations are tracked per file for go-to-definition support.
 	pub fn from_files(dir: &Path) -> anyhow::Result<Self> {
-		let mut all_sql = String::new();
-		for entry in std::fs::read_dir(dir)? {
-			let entry = entry?;
+		let mut graph = Self::default();
+		Self::collect_files(dir, &mut graph)?;
+		Ok(graph)
+	}
+
+	fn collect_files(dir: &Path, graph: &mut Self) -> anyhow::Result<()> {
+		let mut entries: Vec<_> = std::fs::read_dir(dir)?.filter_map(|e| e.ok()).collect();
+		entries.sort_by_key(|e| e.file_name());
+
+		for entry in entries {
 			let path = entry.path();
 			if path.is_file() && path.extension().is_some_and(|ext| ext == "surql") {
 				let content = std::fs::read_to_string(&path)?;
-				all_sql.push_str(&content);
-				all_sql.push('\n');
+				let mut file_graph = Self::from_source(&content)?;
+				// Attach source locations
+				file_graph.attach_source_locations(&content, &path);
+				graph.merge(file_graph);
 			} else if path.is_dir() {
-				// Recurse into subdirectories
-				let sub_graph = Self::from_files(&path)?;
-				let mut graph = Self::from_source(&all_sql)?;
-				graph.merge(sub_graph);
-				return Ok(graph);
+				Self::collect_files(&path, graph)?;
 			}
 		}
-		Self::from_source(&all_sql)
+		Ok(())
+	}
+
+	/// Scan source text for DEFINE keywords and attach byte offsets to graph entries.
+	fn attach_source_locations(&mut self, source: &str, file: &Path) {
+		let upper = source.to_uppercase();
+		let file = file.to_path_buf();
+
+		// Find DEFINE TABLE locations
+		for table in self.tables.values_mut() {
+			if table.source.is_some() {
+				continue;
+			}
+			let search = format!("DEFINE TABLE {}", table.name.to_uppercase());
+			if let Some(offset) = upper.find(&search) {
+				table.source = Some(SourceLocation {
+					file: file.clone(),
+					offset,
+					len: search.len(),
+				});
+			}
+		}
+
+		// Find DEFINE FUNCTION locations
+		for func in self.functions.values_mut() {
+			if func.source.is_some() {
+				continue;
+			}
+			let search = format!("DEFINE FUNCTION FN::{}", func.name.to_uppercase());
+			if let Some(offset) = upper.find(&search) {
+				func.source = Some(SourceLocation {
+					file: file.clone(),
+					offset,
+					len: search.len(),
+				});
+			}
+		}
 	}
 
 	/// Merge another schema graph into this one (last write wins).

@@ -12,6 +12,7 @@ use crate::completion;
 use crate::diagnostics;
 use crate::document::DocumentStore;
 use crate::formatting;
+use crate::signature;
 
 pub struct Backend {
 	client: Client,
@@ -81,6 +82,11 @@ impl LanguageServer for Backend {
 				document_formatting_provider: Some(OneOf::Left(true)),
 				hover_provider: Some(HoverProviderCapability::Simple(true)),
 				definition_provider: Some(OneOf::Left(true)),
+				signature_help_provider: Some(SignatureHelpOptions {
+					trigger_characters: Some(vec!["(".into(), ",".into()]),
+					retrigger_characters: Some(vec![",".into()]),
+					..Default::default()
+				}),
 				..Default::default()
 			},
 			..Default::default()
@@ -222,13 +228,93 @@ impl LanguageServer for Backend {
 		Ok(None)
 	}
 
+	async fn signature_help(&self, params: SignatureHelpParams) -> Result<Option<SignatureHelp>> {
+		let uri = &params.text_document_position_params.text_document.uri;
+		let position = params.text_document_position_params.position;
+		let source = match self.documents.get(uri) {
+			Some(s) => s,
+			None => return Ok(None),
+		};
+		let schema = self.schema.read().ok();
+		Ok(signature::signature_help(
+			&source,
+			position,
+			schema.as_deref(),
+		))
+	}
+
 	async fn goto_definition(
 		&self,
 		params: GotoDefinitionParams,
 	) -> Result<Option<GotoDefinitionResponse>> {
-		// TODO: implement using SourceLocation from SchemaGraph
-		let _ = params;
+		let uri = &params.text_document_position_params.text_document.uri;
+		let position = params.text_document_position_params.position;
+		let source = match self.documents.get(uri) {
+			Some(s) => s,
+			None => return Ok(None),
+		};
+
+		let word = word_at_position(&source, position);
+		if word.is_empty() {
+			return Ok(None);
+		}
+
+		let schema = self.schema.read().ok();
+		let schema = match schema.as_deref() {
+			Some(sg) => sg,
+			None => return Ok(None),
+		};
+
+		// Try to find definition location
+		let fn_name = word.strip_prefix("fn::").unwrap_or(&word);
+		if let Some(func) = schema.function(fn_name) {
+			if let Some(ref loc) = func.source {
+				if let Ok(target_uri) = Url::from_file_path(&loc.file) {
+					// Read the target file to compute line/col from byte offset
+					if let Ok(content) = std::fs::read_to_string(&loc.file) {
+						let pos = byte_offset_to_position(&content, loc.offset);
+						return Ok(Some(GotoDefinitionResponse::Scalar(Location {
+							uri: target_uri,
+							range: Range {
+								start: pos,
+								end: pos,
+							},
+						})));
+					}
+				}
+			}
+		}
+
+		if let Some(table) = schema.table(&word) {
+			if let Some(ref loc) = table.source {
+				if let Ok(target_uri) = Url::from_file_path(&loc.file) {
+					if let Ok(content) = std::fs::read_to_string(&loc.file) {
+						let pos = byte_offset_to_position(&content, loc.offset);
+						return Ok(Some(GotoDefinitionResponse::Scalar(Location {
+							uri: target_uri,
+							range: Range {
+								start: pos,
+								end: pos,
+							},
+						})));
+					}
+				}
+			}
+		}
+
 		Ok(None)
+	}
+}
+
+/// Convert a byte offset in source text to an LSP Position (0-indexed line/col).
+pub(crate) fn byte_offset_to_position(source: &str, offset: usize) -> Position {
+	let offset = offset.min(source.len());
+	let before = &source[..offset];
+	let line = before.matches('\n').count() as u32;
+	let col = before.rfind('\n').map(|i| offset - i - 1).unwrap_or(offset) as u32;
+	Position {
+		line,
+		character: col,
 	}
 }
 

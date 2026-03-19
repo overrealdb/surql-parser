@@ -874,3 +874,395 @@ mod edge_cases {
 		);
 	}
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+// 9. FIELD COMPLETIONS (after `table.`)
+// ═══════════════════════════════════════════════════════════════════════
+
+#[cfg(test)]
+mod field_completions {
+	use crate::completion;
+	use crate::completion::{Context, detect_context};
+	use surql_parser::SchemaGraph;
+	use tower_lsp::lsp_types::{CompletionItemKind, Position};
+
+	fn pos(line: u32, col: u32) -> Position {
+		Position {
+			line,
+			character: col,
+		}
+	}
+
+	fn schema() -> SchemaGraph {
+		SchemaGraph::from_source(
+			"
+			DEFINE TABLE user SCHEMAFULL;
+			DEFINE FIELD name ON user TYPE string;
+			DEFINE FIELD age ON user TYPE int;
+			DEFINE FIELD email ON user TYPE string;
+			DEFINE TABLE post SCHEMAFULL;
+			DEFINE FIELD title ON post TYPE string;
+			DEFINE FIELD author ON post TYPE record<user>;
+		",
+		)
+		.unwrap()
+	}
+
+	#[test]
+	fn context_after_table_dot() {
+		assert_eq!(
+			detect_context("user.", pos(0, 5)),
+			Context::FieldName("user".into())
+		);
+	}
+
+	#[test]
+	fn context_after_table_dot_in_select() {
+		assert_eq!(
+			detect_context("SELECT user.", pos(0, 12)),
+			Context::FieldName("user".into())
+		);
+	}
+
+	#[test]
+	fn context_after_table_dot_in_where() {
+		// col 30 = after the dot (len of "SELECT * FROM user WHERE user.")
+		assert_eq!(
+			detect_context("SELECT * FROM user WHERE user.", pos(0, 30)),
+			Context::FieldName("user".into())
+		);
+	}
+
+	#[test]
+	fn fields_returned_for_known_table() {
+		let sg = schema();
+		let items = completion::complete("SELECT user.", pos(0, 12), Some(&sg));
+		let fields: Vec<_> = items
+			.iter()
+			.filter(|i| i.kind == Some(CompletionItemKind::FIELD))
+			.collect();
+		assert!(fields.iter().any(|i| i.label == "name"));
+		assert!(fields.iter().any(|i| i.label == "age"));
+		assert!(fields.iter().any(|i| i.label == "email"));
+	}
+
+	#[test]
+	fn field_detail_shows_type() {
+		let sg = schema();
+		let items = completion::complete("SELECT user.", pos(0, 12), Some(&sg));
+		let name = items.iter().find(|i| i.label == "name").unwrap();
+		assert_eq!(name.detail.as_deref(), Some("string"));
+	}
+
+	#[test]
+	fn post_fields_different_from_user() {
+		let sg = schema();
+		let items = completion::complete("SELECT post.", pos(0, 12), Some(&sg));
+		let fields: Vec<_> = items
+			.iter()
+			.filter(|i| i.kind == Some(CompletionItemKind::FIELD))
+			.collect();
+		assert!(fields.iter().any(|i| i.label == "title"));
+		assert!(fields.iter().any(|i| i.label == "author"));
+		assert!(!fields.iter().any(|i| i.label == "name"));
+	}
+
+	#[test]
+	fn unknown_table_returns_no_fields() {
+		let sg = schema();
+		let items = completion::complete("SELECT unknown.", pos(0, 15), Some(&sg));
+		let fields: Vec<_> = items
+			.iter()
+			.filter(|i| i.kind == Some(CompletionItemKind::FIELD))
+			.collect();
+		assert!(fields.is_empty());
+	}
+
+	#[test]
+	fn graph_traversal_operators_included() {
+		let sg = schema();
+		let items = completion::complete("SELECT user.", pos(0, 12), Some(&sg));
+		assert!(items.iter().any(|i| i.label == "->"));
+		assert!(items.iter().any(|i| i.label == "<-"));
+	}
+
+	#[test]
+	fn no_schema_no_fields() {
+		let items = completion::complete("SELECT user.", pos(0, 12), None);
+		let fields: Vec<_> = items
+			.iter()
+			.filter(|i| i.kind == Some(CompletionItemKind::FIELD))
+			.collect();
+		assert!(fields.is_empty());
+	}
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// 10. SIGNATURE HELP
+// ═══════════════════════════════════════════════════════════════════════
+
+#[cfg(test)]
+mod signature_help {
+	use crate::signature;
+	use surql_parser::SchemaGraph;
+	use tower_lsp::lsp_types::Position;
+
+	fn pos(line: u32, col: u32) -> Position {
+		Position {
+			line,
+			character: col,
+		}
+	}
+
+	fn schema() -> SchemaGraph {
+		SchemaGraph::from_source(
+			"
+			DEFINE FUNCTION fn::greet($name: string) -> string { RETURN 'Hello, ' + $name; };
+			DEFINE FUNCTION fn::add($a: int, $b: int) -> int { RETURN $a + $b; };
+			DEFINE FUNCTION fn::noargs() -> string { RETURN 'hi'; };
+		",
+		)
+		.unwrap()
+	}
+
+	#[test]
+	fn signature_at_opening_paren() {
+		let sg = schema();
+		let help = signature::signature_help("fn::greet(", pos(0, 10), Some(&sg));
+		assert!(help.is_some());
+		let help = help.unwrap();
+		assert_eq!(help.signatures.len(), 1);
+		assert!(help.signatures[0].label.contains("fn::greet"));
+		assert_eq!(help.active_parameter, Some(0));
+	}
+
+	#[test]
+	fn signature_first_param() {
+		let sg = schema();
+		let help = signature::signature_help("fn::add(1", pos(0, 9), Some(&sg));
+		assert!(help.is_some());
+		assert_eq!(help.unwrap().active_parameter, Some(0));
+	}
+
+	#[test]
+	fn signature_second_param() {
+		let sg = schema();
+		let help = signature::signature_help("fn::add(1, ", pos(0, 11), Some(&sg));
+		assert!(help.is_some());
+		assert_eq!(help.unwrap().active_parameter, Some(1));
+	}
+
+	#[test]
+	fn signature_params_info() {
+		let sg = schema();
+		let help = signature::signature_help("fn::add(", pos(0, 8), Some(&sg)).unwrap();
+		let params = help.signatures[0].parameters.as_ref().unwrap();
+		assert_eq!(params.len(), 2);
+	}
+
+	#[test]
+	fn no_signature_outside_parens() {
+		let sg = schema();
+		let help = signature::signature_help("fn::greet", pos(0, 9), Some(&sg));
+		assert!(help.is_none());
+	}
+
+	#[test]
+	fn no_signature_for_unknown_function() {
+		let sg = schema();
+		let help = signature::signature_help("fn::unknown(", pos(0, 12), Some(&sg));
+		assert!(help.is_none());
+	}
+
+	#[test]
+	fn no_signature_without_schema() {
+		let help = signature::signature_help("fn::greet(", pos(0, 10), None);
+		assert!(help.is_none());
+	}
+
+	#[test]
+	fn signature_noargs_function() {
+		let sg = schema();
+		let help = signature::signature_help("fn::noargs(", pos(0, 11), Some(&sg)).unwrap();
+		let params = help.signatures[0].parameters.as_ref().unwrap();
+		assert!(params.is_empty());
+		assert_eq!(help.active_parameter, Some(0));
+	}
+
+	#[test]
+	fn signature_in_nested_context() {
+		let sg = schema();
+		let help = signature::signature_help("SELECT fn::greet(", pos(0, 17), Some(&sg));
+		assert!(help.is_some());
+	}
+
+	#[test]
+	fn signature_with_nested_parens() {
+		let sg = schema();
+		// fn::add(count(), | — cursor after the comma, nested parens
+		let help = signature::signature_help("fn::add(count(), ", pos(0, 17), Some(&sg));
+		assert!(help.is_some());
+		assert_eq!(help.unwrap().active_parameter, Some(1));
+	}
+
+	#[test]
+	fn signature_label_includes_return_type() {
+		let sg = schema();
+		let help = signature::signature_help("fn::greet(", pos(0, 10), Some(&sg)).unwrap();
+		assert!(help.signatures[0].label.contains("-> string"));
+	}
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// 11. BYTE OFFSET TO POSITION CONVERSION
+// ═══════════════════════════════════════════════════════════════════════
+
+#[cfg(test)]
+mod position_conversion {
+	use crate::server::byte_offset_to_position;
+	use tower_lsp::lsp_types::Position;
+
+	#[test]
+	fn start_of_file() {
+		let pos = byte_offset_to_position("hello\nworld", 0);
+		assert_eq!(
+			pos,
+			Position {
+				line: 0,
+				character: 0
+			}
+		);
+	}
+
+	#[test]
+	fn middle_of_first_line() {
+		let pos = byte_offset_to_position("hello\nworld", 3);
+		assert_eq!(
+			pos,
+			Position {
+				line: 0,
+				character: 3
+			}
+		);
+	}
+
+	#[test]
+	fn start_of_second_line() {
+		let pos = byte_offset_to_position("hello\nworld", 6);
+		assert_eq!(
+			pos,
+			Position {
+				line: 1,
+				character: 0
+			}
+		);
+	}
+
+	#[test]
+	fn middle_of_second_line() {
+		let pos = byte_offset_to_position("hello\nworld", 9);
+		assert_eq!(
+			pos,
+			Position {
+				line: 1,
+				character: 3
+			}
+		);
+	}
+
+	#[test]
+	fn end_of_file() {
+		let pos = byte_offset_to_position("hello\nworld", 11);
+		assert_eq!(
+			pos,
+			Position {
+				line: 1,
+				character: 5
+			}
+		);
+	}
+
+	#[test]
+	fn past_end_of_file() {
+		let pos = byte_offset_to_position("hello", 100);
+		assert_eq!(
+			pos,
+			Position {
+				line: 0,
+				character: 5
+			}
+		);
+	}
+
+	#[test]
+	fn empty_file() {
+		let pos = byte_offset_to_position("", 0);
+		assert_eq!(
+			pos,
+			Position {
+				line: 0,
+				character: 0
+			}
+		);
+	}
+
+	#[test]
+	fn three_lines() {
+		let pos = byte_offset_to_position("a\nb\nc", 4);
+		assert_eq!(
+			pos,
+			Position {
+				line: 2,
+				character: 0
+			}
+		);
+	}
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// 12. BUILT-IN FUNCTION NAMESPACES
+// ═══════════════════════════════════════════════════════════════════════
+
+#[cfg(test)]
+mod builtin_completions {
+	use crate::completion;
+	use surql_parser::SchemaGraph;
+	use tower_lsp::lsp_types::{CompletionItemKind, Position};
+
+	fn pos(line: u32, col: u32) -> Position {
+		Position {
+			line,
+			character: col,
+		}
+	}
+
+	#[test]
+	fn builtin_namespaces_after_fn() {
+		let sg = SchemaGraph::default();
+		let items = completion::complete("SELECT fn::", pos(0, 11), Some(&sg));
+		let modules: Vec<_> = items
+			.iter()
+			.filter(|i| i.kind == Some(CompletionItemKind::MODULE))
+			.collect();
+		assert!(modules.iter().any(|i| i.label == "array::"));
+		assert!(modules.iter().any(|i| i.label == "string::"));
+		assert!(modules.iter().any(|i| i.label == "time::"));
+		assert!(modules.iter().any(|i| i.label == "math::"));
+		assert!(modules.iter().any(|i| i.label == "crypto::"));
+	}
+
+	#[test]
+	fn builtin_namespaces_count() {
+		let sg = SchemaGraph::default();
+		let items = completion::complete("SELECT fn::", pos(0, 11), Some(&sg));
+		let modules: Vec<_> = items
+			.iter()
+			.filter(|i| i.kind == Some(CompletionItemKind::MODULE))
+			.collect();
+		assert!(
+			modules.len() >= 15,
+			"Expected 15+ built-in namespaces, got {}",
+			modules.len()
+		);
+	}
+}
