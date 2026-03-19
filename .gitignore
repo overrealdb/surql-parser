@@ -6,3 +6,4 @@ target/
 lcov.info
 
 editors/zed/grammars/
+editors/zed/extension.wasm
