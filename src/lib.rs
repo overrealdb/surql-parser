@@ -32,6 +32,7 @@ pub mod build;
 )]
 pub mod upstream;
 
+pub mod builtins_generated;
 pub mod recovery;
 pub mod schema_graph;
 
@@ -749,3 +750,30 @@ pub use upstream::syn::error;
 
 pub use recovery::parse_with_recovery;
 pub use schema_graph::SchemaGraph;
+
+// ─── Built-in Function Lookup ───
+
+/// Look up a built-in SurrealQL function by its full name (e.g., `"string::len"`).
+pub fn builtin_function(name: &str) -> Option<&'static builtins_generated::BuiltinFn> {
+	use std::collections::HashMap;
+	use std::sync::LazyLock;
+
+	static INDEX: LazyLock<HashMap<&'static str, &'static builtins_generated::BuiltinFn>> =
+		LazyLock::new(|| {
+			builtins_generated::BUILTINS
+				.iter()
+				.map(|f| (f.name, f))
+				.collect()
+		});
+
+	INDEX.get(name).copied()
+}
+
+/// Return all built-in functions in a given namespace (e.g., `"string"` returns all `string::*`).
+pub fn builtins_in_namespace(ns: &str) -> Vec<&'static builtins_generated::BuiltinFn> {
+	let prefix = format!("{ns}::");
+	builtins_generated::BUILTINS
+		.iter()
+		.filter(|f| f.name.starts_with(&prefix))
+		.collect()
+}

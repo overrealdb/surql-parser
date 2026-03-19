@@ -194,3 +194,138 @@ fn events() {
 	assert_eq!(events.len(), 1);
 	assert_eq!(events[0].name, "user_created");
 }
+
+#[test]
+fn should_extract_table_comment() {
+	let sg = SchemaGraph::from_source(
+		"DEFINE TABLE user SCHEMAFULL COMMENT 'Main user table'; \
+		 DEFINE FIELD name ON user TYPE string COMMENT 'Full name';",
+	)
+	.unwrap();
+	assert_eq!(
+		sg.table("user").unwrap().comment.as_deref(),
+		Some("Main user table")
+	);
+	assert_eq!(
+		sg.fields_of("user")[0].comment.as_deref(),
+		Some("Full name")
+	);
+}
+
+#[test]
+fn should_extract_function_comment() {
+	let sg = SchemaGraph::from_source(
+		"DEFINE FUNCTION fn::greet($name: string) -> string \
+		 { RETURN 'Hello, ' + $name; } COMMENT 'Greeting function'",
+	)
+	.unwrap();
+	assert_eq!(
+		sg.function("greet").unwrap().comment.as_deref(),
+		Some("Greeting function")
+	);
+}
+
+#[test]
+fn should_extract_index_comment() {
+	let sg = SchemaGraph::from_source(
+		"DEFINE TABLE user SCHEMAFULL; \
+		 DEFINE INDEX email_idx ON user FIELDS email UNIQUE COMMENT 'Unique email constraint';",
+	)
+	.unwrap();
+	assert_eq!(
+		sg.indexes_of("user")[0].comment.as_deref(),
+		Some("Unique email constraint")
+	);
+}
+
+#[test]
+fn should_extract_event_comment() {
+	let sg = SchemaGraph::from_source(
+		"DEFINE TABLE user SCHEMAFULL; \
+		 DEFINE EVENT user_created ON user WHEN $event = 'CREATE' \
+		 THEN { CREATE audit SET action = 'created' } COMMENT 'Audit trail';",
+	)
+	.unwrap();
+	assert_eq!(
+		sg.events_of("user")[0].comment.as_deref(),
+		Some("Audit trail")
+	);
+}
+
+#[test]
+fn should_return_none_when_no_comment() {
+	let sg = SchemaGraph::from_source(
+		"DEFINE TABLE user SCHEMAFULL; DEFINE FIELD name ON user TYPE string;",
+	)
+	.unwrap();
+	assert!(sg.table("user").unwrap().comment.is_none());
+	assert!(sg.fields_of("user")[0].comment.is_none());
+}
+
+#[test]
+fn find_field_uses_index() {
+	let table_count = 100;
+	let fields_per_table = 10;
+
+	let mut stmts = String::new();
+	for t in 0..table_count {
+		stmts.push_str(&format!("DEFINE TABLE tbl_{t} SCHEMAFULL;\n"));
+		for f in 0..fields_per_table {
+			stmts.push_str(&format!("DEFINE FIELD fld_{f} ON tbl_{t} TYPE string;\n"));
+		}
+	}
+
+	let sg = SchemaGraph::from_source(&stmts).unwrap();
+
+	assert_eq!(sg.table_names().count(), table_count);
+
+	let results = sg.find_field("fld_0");
+	assert_eq!(results.len(), table_count);
+	for (table_name, field) in &results {
+		assert!(table_name.starts_with("tbl_"));
+		assert_eq!(field.name, "fld_0");
+	}
+
+	let results = sg.find_field("fld_9");
+	assert_eq!(results.len(), table_count);
+
+	let results = sg.find_field("nonexistent");
+	assert!(results.is_empty());
+}
+
+#[test]
+fn find_field_index_maintained_after_merge() {
+	let mut sg1 = SchemaGraph::from_source(
+		"DEFINE TABLE user SCHEMAFULL; DEFINE FIELD name ON user TYPE string;",
+	)
+	.unwrap();
+
+	let sg2 = SchemaGraph::from_source(
+		"DEFINE TABLE post SCHEMAFULL; DEFINE FIELD name ON post TYPE string;",
+	)
+	.unwrap();
+
+	sg1.merge(sg2);
+
+	let results = sg1.find_field("name");
+	assert_eq!(results.len(), 2);
+
+	let table_names: Vec<&str> = results.iter().map(|(t, _)| *t).collect();
+	assert!(table_names.contains(&"user"));
+	assert!(table_names.contains(&"post"));
+}
+
+#[test]
+fn find_field_index_deduplicates_on_merge() {
+	let mut sg1 = SchemaGraph::from_source(
+		"DEFINE TABLE user SCHEMAFULL; DEFINE FIELD name ON user TYPE string;",
+	)
+	.unwrap();
+
+	let sg2 = SchemaGraph::from_source("DEFINE FIELD name ON user TYPE string;").unwrap();
+
+	sg1.merge(sg2);
+
+	let results = sg1.find_field("name");
+	assert_eq!(results.len(), 1);
+}

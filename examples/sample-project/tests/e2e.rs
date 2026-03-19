@@ -104,42 +104,51 @@ fn create_temp_schema(dir: &Path, filename: &str, content: &str) {
 }
 
 #[test]
-#[should_panic(expected = "SurrealQL validation failed")]
-fn build_validate_rejects_invalid_schema() {
+fn build_validate_reports_invalid_schema() {
 	let dir = tempfile::tempdir().unwrap();
 	create_temp_schema(dir.path(), "bad.surql", "SELCT * FORM user;");
-	surql_parser::build::validate_schema(dir.path());
+	let errors = surql_parser::build::validate_schema(dir.path());
+	assert_eq!(errors, 1, "should report 1 error for invalid schema");
 }
 
 #[test]
-#[should_panic(expected = "SurrealQL validation failed")]
-fn build_validate_rejects_unclosed_string() {
+fn build_validate_reports_unclosed_string() {
 	let dir = tempfile::tempdir().unwrap();
 	create_temp_schema(
 		dir.path(),
 		"bad.surql",
 		"SELECT * FROM user WHERE name = 'Alice",
 	);
-	surql_parser::build::validate_schema(dir.path());
+	let errors = surql_parser::build::validate_schema(dir.path());
+	assert_eq!(errors, 1, "should report 1 error for unclosed string");
 }
 
 #[test]
-#[should_panic(expected = "2 error")]
 fn build_validate_collects_all_errors() {
 	let dir = tempfile::tempdir().unwrap();
 	create_temp_schema(dir.path(), "a.surql", "SELEC broken");
 	create_temp_schema(dir.path(), "b.surql", "ALSO broken syntax!!!");
 	create_temp_schema(dir.path(), "c.surql", "SELECT * FROM user;\n"); // this one is OK
-	surql_parser::build::validate_schema(dir.path());
+	let errors = surql_parser::build::validate_schema(dir.path());
+	assert_eq!(errors, 2, "should report 2 errors, c.surql should be OK");
 }
 
 #[test]
-#[should_panic(expected = "Failed to parse schema files")]
-fn build_generate_rejects_invalid_schema() {
+fn build_generate_tolerates_invalid_schema() {
 	let schema_dir = tempfile::tempdir().unwrap();
 	create_temp_schema(schema_dir.path(), "bad.surql", "NOT VALID SQL AT ALL");
+	create_temp_schema(
+		schema_dir.path(),
+		"good.surql",
+		"DEFINE FUNCTION fn::test() -> string { RETURN 'ok'; };",
+	);
 	let out = tempfile::tempdir().unwrap();
 	surql_parser::build::generate_typed_functions(schema_dir.path(), out.path().join("out.rs"));
+	let content = std::fs::read_to_string(out.path().join("out.rs")).unwrap();
+	assert!(
+		content.contains("FN_TEST"),
+		"should generate constant from valid file"
+	);
 }
 
 // ─── Negative: parser rejects invalid SQL at runtime ───

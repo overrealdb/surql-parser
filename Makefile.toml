@@ -104,6 +104,12 @@ script = ["SURREALDB_LOCAL=${SURREALDB_LOCAL:-} ./scripts/sync-upstream.sh local
 description = "Sync parser from SurrealDB main branch"
 script = ["./scripts/sync-upstream.sh main"]
 
+# ─── Builtins ───
+
+[tasks.sync-builtins]
+description = "Sync built-in function docs from SurrealDB docs repo"
+script = ["./scripts/sync-builtins.sh main"]
+
 # ─── Macros ───
 
 [tasks.check-macros]

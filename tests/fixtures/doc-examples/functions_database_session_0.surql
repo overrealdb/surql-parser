@@ -1,0 +1,3 @@
+RETURN session::ac();
+
+"user"

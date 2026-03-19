@@ -42,6 +42,7 @@ pub struct TableDef {
 	pub name: String,
 	pub full: bool,
 	pub table_type: String,
+	pub comment: Option<String>,
 	pub fields: Vec<FieldDef>,
 	pub indexes: Vec<IndexDef>,
 	pub events: Vec<EventDef>,
@@ -56,6 +57,7 @@ pub struct FieldDef {
 	pub record_links: Vec<String>,
 	pub default: Option<String>,
 	pub readonly: bool,
+	pub comment: Option<String>,
 	pub source: Option<SourceLocation>,
 }
 
@@ -65,6 +67,7 @@ pub struct IndexDef {
 	pub name: String,
 	pub columns: Vec<String>,
 	pub unique: bool,
+	pub comment: Option<String>,
 	pub source: Option<SourceLocation>,
 }
 
@@ -72,6 +75,7 @@ pub struct IndexDef {
 #[derive(Debug, Clone)]
 pub struct EventDef {
 	pub name: String,
+	pub comment: Option<String>,
 	pub source: Option<SourceLocation>,
 }
 
@@ -81,6 +85,7 @@ pub struct FunctionDef {
 	pub name: String,
 	pub args: Vec<(String, String)>,
 	pub returns: Option<String>,
+	pub comment: Option<String>,
 	pub source: Option<SourceLocation>,
 }
 
@@ -100,6 +105,8 @@ pub struct SchemaGraph {
 	tables: HashMap<String, TableDef>,
 	functions: HashMap<String, FunctionDef>,
 	params: HashMap<String, ParamDef>,
+	/// field_name -> [(table_name, field_idx)] for O(1) field lookups.
+	field_index: HashMap<String, Vec<(String, usize)>>,
 }
 
 impl SchemaGraph {
@@ -124,11 +131,36 @@ impl SchemaGraph {
 
 		for entry in entries {
 			let path = entry.path();
+			// Skip test fixtures, build artifacts, and node_modules
+			if path.is_dir() {
+				let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+				if matches!(
+					name,
+					"target" | "node_modules" | "fixtures" | ".git" | "build"
+				) {
+					continue;
+				}
+			}
 			if path.is_file() && path.extension().is_some_and(|ext| ext == "surql") {
-				let content = std::fs::read_to_string(&path)?;
-				let mut file_graph = Self::from_source(&content)?;
-				file_graph.attach_source_locations(&content, &path);
-				graph.merge(file_graph);
+				let content = match std::fs::read_to_string(&path) {
+					Ok(c) => c,
+					Err(e) => {
+						tracing::warn!("Skipping {}: {e}", path.display());
+						continue;
+					}
+				};
+				// Use recovery parser so a single broken file doesn't abort the scan
+				let (stmts, _) = crate::parse_with_recovery(&content);
+				match crate::extract_definitions_from_ast(&stmts) {
+					Ok(defs) => {
+						let mut file_graph = Self::from_definitions(&defs);
+						file_graph.attach_source_locations(&content, &path);
+						graph.merge(file_graph);
+					}
+					Err(e) => {
+						tracing::warn!("Skipping defs from {}: {e}", path.display());
+					}
+				}
 			} else if path.is_dir() {
 				Self::collect_files(&path, graph)?;
 			}
@@ -137,7 +169,7 @@ impl SchemaGraph {
 	}
 
 	/// Scan source text via the lexer for DEFINE statement positions.
-	fn attach_source_locations(&mut self, source: &str, file: &Path) {
+	pub fn attach_source_locations(&mut self, source: &str, file: &Path) {
 		use crate::upstream::syn::lexer::Lexer;
 		use crate::upstream::syn::token::TokenKind;
 
@@ -244,17 +276,46 @@ impl SchemaGraph {
 		}
 	}
 
-	/// Merge another schema graph into this one (last write wins).
+	/// Merge another schema graph into this one.
+	///
+	/// Fields, indexes, and events are deduplicated by name.
+	/// SCHEMAFULL wins over SCHEMALESS (once a table is marked SCHEMAFULL, it stays).
 	pub fn merge(&mut self, other: SchemaGraph) {
 		for (name, table) in other.tables {
 			if let Some(existing) = self.tables.get_mut(&name) {
-				existing.fields.extend(table.fields);
-				existing.indexes.extend(table.indexes);
-				existing.events.extend(table.events);
+				if table.full {
+					existing.full = true;
+				}
+				for field in table.fields {
+					if !existing.fields.iter().any(|f| f.name == field.name) {
+						let field_idx = existing.fields.len();
+						self.field_index
+							.entry(field.name.clone())
+							.or_default()
+							.push((name.clone(), field_idx));
+						existing.fields.push(field);
+					}
+				}
+				for index in table.indexes {
+					if !existing.indexes.iter().any(|i| i.name == index.name) {
+						existing.indexes.push(index);
+					}
+				}
+				for event in table.events {
+					if !existing.events.iter().any(|e| e.name == event.name) {
+						existing.events.push(event);
+					}
+				}
 				if table.source.is_some() {
 					existing.source = table.source;
 				}
 			} else {
+				for (field_idx, field) in table.fields.iter().enumerate() {
+					self.field_index
+						.entry(field.name.clone())
+						.or_default()
+						.push((name.clone(), field_idx));
+				}
 				self.tables.insert(name, table);
 			}
 		}
@@ -262,7 +323,7 @@ impl SchemaGraph {
 		self.params.extend(other.params);
 	}
 
-	fn from_definitions(defs: &crate::SchemaDefinitions) -> Self {
+	pub fn from_definitions(defs: &crate::SchemaDefinitions) -> Self {
 		let mut graph = Self::default();
 
 		for t in &defs.tables {
@@ -273,6 +334,7 @@ impl SchemaGraph {
 					name,
 					full: t.full,
 					table_type: format!("{:?}", t.table_type),
+					comment: extract_comment(&t.comment),
 					fields: Vec::new(),
 					indexes: Vec::new(),
 					events: Vec::new(),
@@ -306,6 +368,7 @@ impl SchemaGraph {
 				record_links,
 				default: default_str,
 				readonly: f.readonly,
+				comment: extract_comment(&f.comment),
 				source: None,
 			};
 
@@ -318,6 +381,7 @@ impl SchemaGraph {
 						name: table_name,
 						full: false,
 						table_type: "Any".into(),
+						comment: None,
 						fields: vec![def],
 						indexes: Vec::new(),
 						events: Vec::new(),
@@ -337,6 +401,7 @@ impl SchemaGraph {
 				name: index_name,
 				columns,
 				unique,
+				comment: extract_comment(&idx.comment),
 				source: None,
 			};
 
@@ -351,6 +416,7 @@ impl SchemaGraph {
 
 			let def = EventDef {
 				name: event_name,
+				comment: extract_comment(&ev.comment),
 				source: None,
 			};
 
@@ -382,6 +448,7 @@ impl SchemaGraph {
 					name: func.name.clone(),
 					args,
 					returns,
+					comment: extract_comment(&func.comment),
 					source: None,
 				},
 			);
@@ -397,7 +464,20 @@ impl SchemaGraph {
 			);
 		}
 
+		graph.rebuild_field_index();
 		graph
+	}
+
+	fn rebuild_field_index(&mut self) {
+		self.field_index.clear();
+		for (table_name, table) in &self.tables {
+			for (field_idx, field) in table.fields.iter().enumerate() {
+				self.field_index
+					.entry(field.name.clone())
+					.or_default()
+					.push((table_name.clone(), field_idx));
+			}
+		}
 	}
 
 	// ─── Lookups ───
@@ -450,6 +530,31 @@ impl SchemaGraph {
 	pub fn param_names(&self) -> impl Iterator<Item = &str> {
 		self.params.keys().map(|s| s.as_str())
 	}
+
+	/// Find a field by name across all tables. Returns (table_name, field_def).
+	///
+	/// Uses a pre-built HashMap index for O(1) lookup by field name,
+	/// instead of scanning all tables.
+	pub fn find_field(&self, field_name: &str) -> Vec<(&str, &FieldDef)> {
+		let Some(entries) = self.field_index.get(field_name) else {
+			return Vec::new();
+		};
+		entries
+			.iter()
+			.filter_map(|(table_name, field_idx)| {
+				let table = self.tables.get(table_name)?;
+				let field = table.fields.get(*field_idx)?;
+				Some((table_name.as_str(), field))
+			})
+			.collect()
+	}
+
+	/// Find a field on a specific table.
+	pub fn field_on(&self, table: &str, field_name: &str) -> Option<&FieldDef> {
+		self.tables
+			.get(table)
+			.and_then(|t| t.fields.iter().find(|f| f.name == field_name))
+	}
 }
 
 // ─── Helpers ───
@@ -471,6 +576,23 @@ fn expr_to_string(expr: &crate::Expr) -> String {
 		.trim_matches('⟨')
 		.trim_matches('⟩')
 		.to_string()
+}
+
+fn extract_comment(expr: &crate::Expr) -> Option<String> {
+	use crate::upstream::sql::Literal;
+	match expr {
+		crate::Expr::Literal(Literal::None) => None,
+		crate::Expr::Literal(Literal::String(s)) => Some(s.clone()),
+		other => {
+			let s = expr_to_string(other);
+			let trimmed = s.trim_matches('\'').trim_matches('"');
+			if trimmed.is_empty() {
+				None
+			} else {
+				Some(trimmed.to_string())
+			}
+		}
+	}
 }
 
 fn extract_record_links(kind: &crate::Kind) -> Vec<String> {

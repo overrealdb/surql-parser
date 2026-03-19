@@ -1,0 +1,12 @@
+REMOVE INDEX user_name ON user;
+REMOVE FIELD bio ON user;
+DEFINE FIELD profile ON user TYPE object DEFAULT {  } PERMISSIONS FULL;
+DEFINE FIELD profile.bio ON user TYPE none | string PERMISSIONS FULL;
+DEFINE FIELD profile.avatar ON user TYPE none | string PERMISSIONS FULL;
+DEFINE FIELD profile.website ON user TYPE none | string PERMISSIONS FULL;
+REMOVE FIELD avatar ON user;
+DEFINE FIELD updated_at ON user TYPE datetime DEFAULT time::now() PERMISSIONS FULL;
+DEFINE FIELD updated_at ON post TYPE datetime DEFAULT time::now() PERMISSIONS FULL;
+DEFINE INDEX user_active ON user FIELDS active;
+DEFINE INDEX post_published ON post FIELDS published;
+DEFINE INDEX post_created ON post FIELDS created_at;

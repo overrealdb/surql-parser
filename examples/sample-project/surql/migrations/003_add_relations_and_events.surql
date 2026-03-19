@@ -1,0 +1,16 @@
+DEFINE TABLE follows TYPE NORMAL SCHEMAFULL PERMISSIONS NONE;
+DEFINE FIELD in ON follows TYPE record<user> PERMISSIONS FULL;
+DEFINE FIELD out ON follows TYPE record<user> PERMISSIONS FULL;
+DEFINE FIELD since ON follows TYPE datetime DEFAULT time::now() PERMISSIONS FULL;
+DEFINE TABLE comment TYPE NORMAL SCHEMAFULL PERMISSIONS NONE;
+DEFINE FIELD text ON comment TYPE string PERMISSIONS FULL;
+DEFINE FIELD author ON comment TYPE record<user> PERMISSIONS FULL;
+DEFINE FIELD post ON comment TYPE record<post> PERMISSIONS FULL;
+DEFINE FIELD created_at ON comment TYPE datetime DEFAULT time::now() PERMISSIONS FULL;
+DEFINE TABLE audit TYPE NORMAL DROP SCHEMAFULL PERMISSIONS NONE;
+DEFINE FIELD action ON audit TYPE string PERMISSIONS FULL;
+DEFINE FIELD target ON audit TYPE record PERMISSIONS FULL;
+DEFINE FIELD timestamp ON audit TYPE datetime DEFAULT time::now() PERMISSIONS FULL;
+DEFINE EVENT user_created ON user WHEN $event = 'CREATE' THEN { CREATE audit SET action = 'user_created', target = $after.id, timestamp = time::now() };
+DEFINE EVENT post_published ON post WHEN $event = 'UPDATE' AND $after.published = true AND $before.published = false THEN { CREATE audit SET action = 'post_published', target = $after.id, timestamp = time::now() };
+DEFINE FUNCTION fn::user::feed($`$user_id`: record<user>) -> array { RETURN (SELECT ->follows->user->wrote->post.* AS posts FROM ONLY $user_id FETCH posts.author) } PERMISSIONS FULL;

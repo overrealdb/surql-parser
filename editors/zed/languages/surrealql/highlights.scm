@@ -1,4 +1,10 @@
-; Keywords
+; SurrealQL highlights for tree-sitter (SurrealDB 3+)
+;
+; Node names match grammar.js kw() aliases:
+;   kw("SCHEMAFULL") → keyword_schemafull
+;   kw("CONTAINSALL") → keyword_containsall (no underscore)
+
+; ─── Keywords ───
 [
   (keyword_select)
   (keyword_from)
@@ -23,7 +29,6 @@
   (keyword_order)
   (keyword_with)
   (keyword_index)
-  (keyword_no_index)
   (keyword_where)
   (keyword_split)
   (keyword_at)
@@ -37,16 +42,16 @@
   (keyword_is)
   (keyword_not)
   (keyword_contains)
-  (keyword_contains_not)
-  (keyword_contains_all)
-  (keyword_contains_any)
-  (keyword_contains_none)
+  (keyword_containsnot)
+  (keyword_containsall)
+  (keyword_containsany)
+  (keyword_containsnone)
   (keyword_inside)
   (keyword_in)
-  (keyword_not_inside)
-  (keyword_all_inside)
-  (keyword_any_inside)
-  (keyword_none_inside)
+  (keyword_notinside)
+  (keyword_allinside)
+  (keyword_anyinside)
+  (keyword_noneinside)
   (keyword_outside)
   (keyword_intersects)
   (keyword_chebyshev)
@@ -64,7 +69,6 @@
   (keyword_function)
   (keyword_namespace)
   (keyword_param)
-  (keyword_scope)
   (keyword_drop)
   (keyword_schemafull)
   (keyword_schemaless)
@@ -73,19 +77,6 @@
   (keyword_flexible)
   (keyword_readonly)
   (keyword_jwks)
-  (keyword_eddsa)
-  (keyword_es256)
-  (keyword_es384)
-  (keyword_es512)
-  (keyword_hs256)
-  (keyword_hs384)
-  (keyword_hs512)
-  (keyword_ps256)
-  (keyword_ps384)
-  (keyword_ps512)
-  (keyword_rs256)
-  (keyword_rs384)
-  (keyword_rs512)
   (keyword_bm25)
   (keyword_doc_ids_cache)
   (keyword_doc_ids_order)
@@ -102,6 +93,8 @@
   (keyword_out)
   (keyword_to)
   (keyword_changefeed)
+  (keyword_include)
+  (keyword_original)
   (keyword_content)
   (keyword_merge)
   (keyword_patch)
@@ -109,7 +102,6 @@
   (keyword_after)
   (keyword_table)
   (keyword_root)
-  (keyword_token)
   (keyword_use)
   (keyword_ns)
   (keyword_db)
@@ -149,10 +141,8 @@
   (keyword_if)
   (keyword_exists)
   (keyword_database)
-  (keyword_namespace)
   (keyword_password)
-  (keyword_password_hash)
-  (keyword_on_duplicate_key_update)
+  (keyword_passhash)
   (keyword_count)
   (keyword_set)
   (keyword_return)
@@ -165,7 +155,6 @@
   (keyword_continue)
   (keyword_sleep)
   (keyword_kill)
-  (keyword_rebuild)
   (keyword_mtree)
   (keyword_dimension)
   (keyword_dist)
@@ -182,35 +171,30 @@
   (keyword_key)
   (keyword_url)
   (keyword_jwt)
-  (keyword_signup)
-  (keyword_issuer)
-  (keyword_refresh)
   (keyword_record)
   (keyword_bearer)
   (keyword_authenticate)
   (keyword_grant)
   (keyword_access)
   (keyword_upsert)
-  (keyword_replace)
 ] @keyword
 
-; Operators
-[
-  (binary_operator)
-  (operator)
-] @operator
+; ─── Operators ───
+(operator) @operator
 
-; Literals
+; ─── Literals ───
 [
   (string)
   (prefixed_string)
 ] @string
+
 [
   (int)
   (float)
   (decimal)
-  (duration)
 ] @number
+
+(duration) @number
 
 [
   (keyword_true)
@@ -222,62 +206,44 @@
   (keyword_null)
 ] @constant.builtin
 
-; Identifiers
+; ─── Identifiers ───
 (identifier) @variable
 (variable_name) @variable.builtin
+
 [
   (custom_function_name)
   (function_name)
 ] @function
 
-; Comments
+; ─── Comments ───
 (comment) @comment
 
-; Punctuation
-[
-  "("
-  ")"
-  "["
-  "]"
-  "{"
-  "}"
-] @punctuation.bracket
-[
- ","
- "|"
-] @punctuation.delimiter
+; ─── Punctuation ───
+["(" ")" "[" "]" "{" "}"] @punctuation.bracket
+["," "|" ";"] @punctuation.delimiter
 
-; Types
-[
-  (type)
-  (type_name)
-  (parameterized_type)
-  (record_id)
-] @type
+; ─── Types ───
+(type_name) @type
+(parameterized_type) @type
 
-; Special
+; ─── Table names (highlight identifiers in table position) ───
+(define_table (identifier) @type)
+(define_field (identifier) @type)
+(define_index (identifier) @type)
+(define_event (identifier) @type)
+(insert_statement (identifier) @type)
+
+; ─── Special nodes ───
 (graph_path) @operator
 (cast_expression) @type
-(negated_expression) @operator
+(record_id (object_key) @type.builtin)
 
-; Field assignments
-(field_assignment 
-  (identifier) @property)
+; ─── Properties ───
+(field_assignment (field_path (identifier) @property))
+(object_property (object_key) @property)
+(subscript (identifier) @property)
 
-; Object properties
-(object_property 
-  (object_key) @property)
-
-; Record IDs
-(record_id 
-  (object_key) @type.builtin)
-(record_id_ident) @constant
-
-; Path expressions  
-(subscript 
-  (identifier) @property)
-
-; Control flow keywords
+; ─── Control flow (more specific highlight) ───
 [
   (keyword_if)
   (keyword_else)
@@ -286,20 +252,12 @@
   (keyword_continue)
 ] @keyword.control
 
-; Storage keywords
+; ─── Storage ───
 [
   (keyword_let)
   (keyword_set)
   (keyword_unset)
 ] @keyword.storage
 
-; Import/export keywords
-[
-  (keyword_use)
-] @keyword.import
-
-; Duration values
-(duration) @number.time
-
-; Errors
+; ─── Errors ───
 (ERROR) @error

@@ -49,3 +49,15 @@ with rationale, any error messages encountered, and the current task status.
 - Zero clippy warnings
 - Zero fmt diffs
 - Never push directly to main — always create a PR
+
+## Architecture
+- `src/builtins_generated.rs` — auto-generated, regenerate with `cargo make sync-builtins`
+- `src/upstream/` — auto-generated from SurrealDB, regenerate with `cargo make sync-main`
+- `tree-sitter-surrealql/` — our grammar (Apache-2.0), generate with `npx tree-sitter generate`
+- LSP binary: `cargo install --path lsp --force` — Zed uses installed binary, NOT dev build
+
+## LSP Development
+- After changing LSP code, MUST run `cargo install --path lsp --force` for Zed to pick up changes
+- `cargo fmt --check` must run from repo root (fails inside tree-sitter-surrealql/)
+- Schema merge: SCHEMAFULL wins, fields/indexes deduplicated by name
+- Clippy must pass for ALL workspace crates: surql-parser, surql-lsp, surql-transform

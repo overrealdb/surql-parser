@@ -1,15 +1,15 @@
 id = "surrealql"
 name = "SurrealQL"
 description = "SurrealQL language support — syntax highlighting, completions, diagnostics, hover, formatting"
-version = "0.1.0"
+version = "0.1.1"
 schema_version = 1
 authors = ["overrealdb"]
 repository = "https://github.com/overrealdb/surql-parser"
 
 [grammars.surrealql]
-repository = "https://github.com/Ce11an/tree-sitter-surrealql"
-commit = "07bf1704b91eeec6b001e2e0d29a4d7f03a01af9"
+repository = "https://github.com/overrealdb/tree-sitter-surrealql"
+rev = "191cc5e250bedf6106c34f65be3e238a0a6f97cb"
 
 [language_servers.surql-lsp]
 name = "surql-lsp"
-languages = ["SurrealQL"]
+languages = ["SurrealQL", "Rust"]

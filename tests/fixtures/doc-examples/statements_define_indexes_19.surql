@@ -1,0 +1,7 @@
+-- Query
+
+{
+	building: {
+		status: 'ready'
+	}
+}

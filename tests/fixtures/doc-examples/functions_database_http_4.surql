@@ -1,0 +1,9 @@
+RETURN http::put('https://jsonplaceholder.typicode.com/posts/1', {
+  id: 1,
+  body: "This is some awesome thinking!",
+  postId: 100,
+  user: {
+    id: 63,
+    username: 'eburras1q'
+  }
+});

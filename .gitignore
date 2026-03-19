@@ -7,3 +7,7 @@ lcov.info
 
 editors/zed/grammars/
 editors/zed/extension.wasm
+tree-sitter-surrealql/node_modules/
+TODO.md
+DISCUSSION.md
+tree-sitter-surrealql/

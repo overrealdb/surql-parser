@@ -1,0 +1,4 @@
+INFO FOR ROOT;
+INFO FOR NS;
+INFO FOR DB;
+RETURN $session;

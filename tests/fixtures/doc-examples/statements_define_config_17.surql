@@ -1,0 +1,2 @@
+-- Define GraphQL configuration
+DEFINE CONFIG GRAPHQL TABLES AUTO FUNCTIONS AUTO;

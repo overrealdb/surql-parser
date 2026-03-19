@@ -14,6 +14,8 @@ pub(crate) enum Context {
 	FieldName(String),
 	/// After `fn::` — suggest function names.
 	FunctionName,
+	/// After a built-in namespace like `string::`, `array::`, etc.
+	BuiltinNamespace(String),
 	/// After `$` — suggest param names.
 	ParamName,
 	/// General context — suggest keywords.
@@ -87,7 +89,6 @@ pub fn complete(
 							.unwrap_or_default();
 						format!("({args}){ret}")
 					});
-					// Snippet: insert fn name + parentheses with tab stops
 					let insert_text = func.map(|f| {
 						if f.args.is_empty() {
 							format!("{name}()")
@@ -111,17 +112,53 @@ pub fn complete(
 					});
 				}
 			}
-			// Built-in function namespaces
-			for ns in &[
-				"array", "count", "crypto", "duration", "geo", "http", "math", "meta", "object",
-				"parse", "rand", "search", "session", "sleep", "string", "time", "type",
-			] {
+			// Built-in function namespaces (from generated data)
+			for ns in surql_parser::builtins_generated::BUILTIN_NAMESPACES {
+				// Only show top-level namespaces (no :: in the name)
+				if !ns.contains("::") {
+					items.push(CompletionItem {
+						label: format!("{ns}::"),
+						kind: Some(CompletionItemKind::MODULE),
+						detail: Some("built-in namespace".into()),
+						..Default::default()
+					});
+				}
+			}
+		}
+		Context::BuiltinNamespace(ref ns) => {
+			for builtin in surql_parser::builtins_in_namespace(ns) {
+				let short_name = builtin
+					.name
+					.strip_prefix(&format!("{ns}::"))
+					.unwrap_or(builtin.name);
+				let detail = if builtin.signatures.is_empty() {
+					Some(builtin.description.to_string())
+				} else {
+					Some(builtin.signatures[0].to_string())
+				};
+				let insert_text = Some(builtin_snippet(short_name, builtin));
 				items.push(CompletionItem {
-					label: format!("{ns}::"),
-					kind: Some(CompletionItemKind::MODULE),
-					detail: Some("built-in namespace".into()),
+					label: builtin.name.to_string(),
+					kind: Some(CompletionItemKind::FUNCTION),
+					detail,
+					insert_text,
+					insert_text_format: Some(InsertTextFormat::SNIPPET),
 					..Default::default()
 				});
+			}
+			// Sub-namespaces (e.g., after `string::` suggest `string::semver::`)
+			let prefix = format!("{ns}::");
+			for sub_ns in surql_parser::builtins_generated::BUILTIN_NAMESPACES {
+				if let Some(rest) = sub_ns.strip_prefix(&prefix)
+					&& !rest.contains("::")
+				{
+					items.push(CompletionItem {
+						label: format!("{sub_ns}::"),
+						kind: Some(CompletionItemKind::MODULE),
+						detail: Some("built-in namespace".into()),
+						..Default::default()
+					});
+				}
 			}
 		}
 		Context::ParamName => {
@@ -165,10 +202,46 @@ pub fn complete(
 					});
 				}
 			}
+			// Top-level built-in namespaces in general context
+			for ns in surql_parser::builtins_generated::BUILTIN_NAMESPACES {
+				if !ns.contains("::") {
+					items.push(CompletionItem {
+						label: format!("{ns}::"),
+						kind: Some(CompletionItemKind::MODULE),
+						detail: Some("built-in namespace".into()),
+						..Default::default()
+					});
+				}
+			}
 		}
 	}
 
 	items
+}
+
+/// Build a snippet with numbered tab stops from a builtin's signature.
+/// e.g., `"len"` + sig `"string::len(string) -> number"` → `"len(${1:string})"`
+fn builtin_snippet(
+	short_name: &str,
+	builtin: &surql_parser::builtins_generated::BuiltinFn,
+) -> String {
+	if let Some(sig) = builtin.signatures.first()
+		&& let Some(paren_start) = sig.find('(')
+		&& let Some(paren_end) = sig.rfind(')')
+	{
+		let params_str = &sig[paren_start + 1..paren_end];
+		if params_str.trim().is_empty() {
+			return format!("{short_name}()");
+		}
+		let params = crate::signature::split_params(params_str);
+		let snippets: Vec<String> = params
+			.iter()
+			.enumerate()
+			.map(|(i, p)| format!("${{{}: {}}}", i + 1, p.trim()))
+			.collect();
+		return format!("{short_name}({})", snippets.join(", "));
+	}
+	format!("{short_name}($0)")
 }
 
 fn keyword_completions() -> Vec<CompletionItem> {
@@ -229,12 +302,10 @@ pub(crate) fn detect_context(source: &str, position: Position) -> Context {
 	}
 
 	// Cursor is right after `.` → field context
-	if last.kind == TokenKind::Dot {
-		if tokens.len() >= 2 {
-			let prev = &tokens[tokens.len() - 2];
-			if prev.kind == TokenKind::Identifier || matches!(prev.kind, TokenKind::Keyword(_)) {
-				return Context::FieldName(token_text(source, prev).to_string());
-			}
+	if last.kind == TokenKind::Dot && tokens.len() >= 2 {
+		let prev = &tokens[tokens.len() - 2];
+		if prev.kind == TokenKind::Identifier || matches!(prev.kind, TokenKind::Keyword(_)) {
+			return Context::FieldName(token_text(source, prev).to_string());
 		}
 	}
 
@@ -246,13 +317,34 @@ pub(crate) fn detect_context(source: &str, position: Position) -> Context {
 			_ => {}
 		}
 
-		// After `fn::` — lexer emits Keyword(Fn) + PathSeperator
+		// After `namespace::` — lexer emits Keyword/Identifier + PathSeperator
 		if last.kind == TokenKind::PathSeperator && tokens.len() >= 2 {
-			let prev_text = token_text(source, &tokens[tokens.len() - 2]).to_uppercase();
-			if prev_text == "FN" {
+			let prev_text = token_text(source, &tokens[tokens.len() - 2]);
+			let prev_upper = prev_text.to_uppercase();
+			if prev_upper == "FN" {
 				return Context::FunctionName;
 			}
+			// Check for built-in namespace (string::, array::, etc.)
+			let ns = prev_text.to_lowercase();
+			if surql_parser::builtins_generated::BUILTIN_NAMESPACES.contains(&ns.as_str()) {
+				return Context::BuiltinNamespace(ns);
+			}
 		}
+
+		// Multi-level namespace: e.g., `string::semver::` →
+		// tokens: [Keyword("string"), PathSep, Ident("semver"), PathSep]
+		if last.kind == TokenKind::PathSeperator && tokens.len() >= 4 {
+			let t3 = token_text(source, &tokens[tokens.len() - 2]).to_lowercase();
+			if tokens[tokens.len() - 3].kind == TokenKind::PathSeperator {
+				let t1 = token_text(source, &tokens[tokens.len() - 4]).to_lowercase();
+				let combined = format!("{t1}::{t3}");
+				if surql_parser::builtins_generated::BUILTIN_NAMESPACES.contains(&combined.as_str())
+				{
+					return Context::BuiltinNamespace(combined);
+				}
+			}
+		}
+
 		if last_text == "FN" {
 			return Context::FunctionName;
 		}
@@ -267,7 +359,7 @@ pub(crate) fn detect_context(source: &str, position: Position) -> Context {
 }
 
 /// Convert an LSP Position (0-indexed line/col) to a byte offset.
-fn position_to_byte_offset(source: &str, position: Position) -> usize {
+pub(crate) fn position_to_byte_offset(source: &str, position: Position) -> usize {
 	let mut offset = 0;
 	for (i, line) in source.lines().enumerate() {
 		if i == position.line as usize {

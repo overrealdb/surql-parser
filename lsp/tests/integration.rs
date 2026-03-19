@@ -3,7 +3,7 @@
 //! Spawns a real LSP server via duplex channels and sends JSON-RPC messages.
 //! Verifies actual protocol responses, not just unit handler outputs.
 
-use bytes::{Buf, BufMut, BytesMut};
+use bytes::{BufMut, BytesMut};
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_util::codec::{Decoder, Encoder};
@@ -236,6 +236,23 @@ impl TestServer {
 		send_raw(&mut self.to_server, &req).await;
 		recv_until(&mut self.from_server, |msg| {
 			msg.get("id") == Some(&json!(4))
+		})
+		.await
+	}
+
+	async fn request_goto_definition(&mut self, uri: &str, line: u32, character: u32) -> Value {
+		let req = json!({
+			"jsonrpc": "2.0",
+			"id": 5,
+			"method": "textDocument/definition",
+			"params": {
+				"textDocument": { "uri": uri },
+				"position": { "line": line, "character": character }
+			}
+		});
+		send_raw(&mut self.to_server, &req).await;
+		recv_until(&mut self.from_server, |msg| {
+			msg.get("id") == Some(&json!(5))
 		})
 		.await
 	}
@@ -491,5 +508,148 @@ async fn full_lifecycle() {
 	);
 
 	// 5. Shutdown
+	server.shutdown().await;
+}
+
+#[tokio::test]
+async fn hover_returns_table_info_for_defined_table() {
+	let mut server = TestServer::start().await;
+	server.initialize().await;
+
+	let uri = "file:///schema.surql";
+	let source = "DEFINE TABLE user SCHEMAFULL;\nDEFINE FIELD name ON user TYPE string;\nSELECT * FROM user;";
+	server.open_document(uri, source).await;
+
+	// Wait for diagnostics (which also populates document_schemas)
+	let _ = recv_until(&mut server.from_server, |msg| {
+		msg.get("method") == Some(&json!("textDocument/publishDiagnostics"))
+	})
+	.await;
+
+	// Hover on "user" in the SELECT line (line 2, col 16)
+	let resp = server.request_hover(uri, 2, 16).await;
+	let result = &resp["result"];
+
+	assert!(
+		!result.is_null(),
+		"hover on 'user' should return table info, got null. Full response: {resp}"
+	);
+	let content = result["contents"]["value"].as_str().unwrap_or("");
+	assert!(
+		content.contains("TABLE"),
+		"hover should mention TABLE, got: {content}"
+	);
+	assert!(
+		content.contains("user"),
+		"hover should mention table name 'user', got: {content}"
+	);
+
+	server.shutdown().await;
+}
+
+#[tokio::test]
+async fn hover_returns_keyword_docs() {
+	let mut server = TestServer::start().await;
+	server.initialize().await;
+
+	let uri = "file:///kw.surql";
+	server.open_document(uri, "SELECT * FROM user").await;
+	let _ = recv_until(&mut server.from_server, |msg| {
+		msg.get("method") == Some(&json!("textDocument/publishDiagnostics"))
+	})
+	.await;
+
+	// Hover on "SELECT" (line 0, col 3)
+	let resp = server.request_hover(uri, 0, 3).await;
+	let result = &resp["result"];
+
+	assert!(
+		!result.is_null(),
+		"hover on 'SELECT' should return keyword docs, got null. Full response: {resp}"
+	);
+	let content = result["contents"]["value"].as_str().unwrap_or("");
+	assert!(
+		content.contains("SELECT"),
+		"keyword hover should contain SELECT, got: {content}"
+	);
+
+	server.shutdown().await;
+}
+
+#[tokio::test]
+async fn goto_definition_for_table() {
+	let mut server = TestServer::start().await;
+	server.initialize().await;
+
+	let uri = "file:///goto.surql";
+	let source = "DEFINE TABLE user SCHEMAFULL;\nDEFINE FIELD name ON user TYPE string;\nSELECT * FROM user;";
+	server.open_document(uri, source).await;
+	let _ = recv_until(&mut server.from_server, |msg| {
+		msg.get("method") == Some(&json!("textDocument/publishDiagnostics"))
+	})
+	.await;
+
+	// goto_def on "user" in SELECT (line 2, col 16)
+	let resp = server.request_goto_definition(uri, 2, 16).await;
+	let result = &resp["result"];
+
+	assert!(
+		!result.is_null(),
+		"goto_def on 'user' should return a location, got null. Full: {resp}"
+	);
+	assert_eq!(
+		result["uri"].as_str().unwrap_or(""),
+		uri,
+		"goto_def should point to same file"
+	);
+
+	server.shutdown().await;
+}
+
+#[tokio::test]
+async fn goto_definition_for_function() {
+	let mut server = TestServer::start().await;
+	server.initialize().await;
+
+	let uri = "file:///goto_fn.surql";
+	let source = "DEFINE FUNCTION fn::greet($name: string) -> string { RETURN 'Hello'; };\nLET $g = fn::greet('World');";
+	server.open_document(uri, source).await;
+	let _ = recv_until(&mut server.from_server, |msg| {
+		msg.get("method") == Some(&json!("textDocument/publishDiagnostics"))
+	})
+	.await;
+
+	// goto_def on "fn::greet" in LET (line 1, col 14)
+	let resp = server.request_goto_definition(uri, 1, 14).await;
+	let result = &resp["result"];
+
+	assert!(
+		!result.is_null(),
+		"goto_def on 'fn::greet' should return a location, got null. Full: {resp}"
+	);
+
+	server.shutdown().await;
+}
+
+#[tokio::test]
+async fn goto_definition_returns_null_for_unknown() {
+	let mut server = TestServer::start().await;
+	server.initialize().await;
+
+	let uri = "file:///goto_unknown.surql";
+	server
+		.open_document(uri, "SELECT * FROM nonexistent_table")
+		.await;
+	let _ = recv_until(&mut server.from_server, |msg| {
+		msg.get("method") == Some(&json!("textDocument/publishDiagnostics"))
+	})
+	.await;
+
+	let resp = server.request_goto_definition(uri, 0, 18).await;
+	assert!(
+		resp["result"].is_null(),
+		"goto_def on undefined table should return null"
+	);
+
 	server.shutdown().await;
 }

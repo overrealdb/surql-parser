@@ -49,6 +49,7 @@ pub struct RemoveRules {
 
 	/// Cfg attributes to strip items for (e.g., "cfg(test)").
 	#[serde(default)]
+	#[allow(dead_code)]
 	pub remove_cfg: Vec<String>,
 }
 
@@ -62,6 +63,7 @@ pub struct AttributeRules {
 	/// Key: attribute name (e.g., "instrument")
 	/// Value: feature name (e.g., "tracing")
 	#[serde(default)]
+	#[allow(dead_code)]
 	pub cfg_wrap: HashMap<String, String>,
 }
 
@@ -69,6 +71,7 @@ pub struct AttributeRules {
 pub struct WarningConfig {
 	/// Warn when encountering unknown crate:: paths not in import_rewrites.
 	#[serde(default = "default_true")]
+	#[allow(dead_code)]
 	pub warn_unknown_imports: bool,
 
 	/// Fail on unknown imports (strict mode).
