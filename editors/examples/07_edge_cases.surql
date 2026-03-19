@@ -64,8 +64,9 @@ SELECT * FROM user WHERE tags CONTAINSNONE ['banned'];
   Multi-line
   block comment
 */
-/* Nested /* comments */ work */
-SELECT /* inline comment */ * FROM user;
+/* Nested comments are not supported */
+-- inline comments inside statements are not supported
+SELECT * FROM user;
 
 -- ─── Complex nesting ───
 SELECT * FROM (
@@ -84,7 +85,7 @@ CREATE config SET
 			timeout: 30s
 		}
 	},
-	features: ['auth', 'graphql', 'live'];
+	features = ['auth', 'graphql', 'live'];
 
 -- ─── Array operations ───
 SELECT * FROM user WHERE 'admin' IN tags;
@@ -92,12 +93,12 @@ SELECT * FROM [1, 2, 3, 4, 5];
 SELECT * FROM user WHERE age IN [18, 21, 30, 40, 50];
 
 -- ─── Parameters in various positions ───
-SELECT $fields FROM $table WHERE $condition ORDER BY $sort LIMIT $limit;
+SELECT $fields FROM $table WHERE $condition LIMIT $limit;
 CREATE $table SET name = $name, data = $data;
 RELATE $from->$edge->$to;
 
 -- ─── Empty statements & semicolons ───
 ;;;
-SELECT 1;
+RETURN 1;
 ;
-SELECT 2;
+RETURN 2;

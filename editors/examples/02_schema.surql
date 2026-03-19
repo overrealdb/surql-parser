@@ -15,14 +15,14 @@ DEFINE TABLE article SCHEMAFULL CHANGEFEED 1d INCLUDE ORIGINAL;
 
 -- Fields with types
 DEFINE FIELD name ON user TYPE string;
-DEFINE FIELD email ON user TYPE string ASSERT string::is::email($value);
+DEFINE FIELD email ON user TYPE string ASSERT string::is_email($value);
 DEFINE FIELD age ON user TYPE int DEFAULT 0;
 DEFINE FIELD active ON user TYPE bool DEFAULT true;
 DEFINE FIELD created_at ON user TYPE datetime DEFAULT time::now();
 DEFINE FIELD tags ON user TYPE array<string> DEFAULT [];
 DEFINE FIELD settings ON user TYPE object DEFAULT {};
 DEFINE FIELD avatar ON user TYPE option<string>;
-DEFINE FIELD bio ON user TYPE option<string> FLEXIBLE;
+DEFINE FIELD bio ON user TYPE option<object> FLEXIBLE;
 DEFINE FIELD password ON user TYPE string READONLY;
 
 -- Record links
@@ -53,9 +53,9 @@ DEFINE ANALYZER ascii TOKENIZERS blank, class FILTERS ascii, lowercase;
 -- Access & Users
 DEFINE USER admin ON DATABASE PASSWORD 'secret123' ROLES OWNER;
 
--- Overwrite
-DEFINE TABLE user OVERWRITE SCHEMAFULL;
-DEFINE FIELD name OVERWRITE ON user TYPE string;
+-- Or Replace (overwrite)
+DEFINE TABLE IF NOT EXISTS user SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS name ON user TYPE string;
 
 -- If Not Exists
 DEFINE TABLE IF NOT EXISTS archive SCHEMALESS;

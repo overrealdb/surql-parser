@@ -67,9 +67,9 @@ FROM post;
 
 -- Type functions
 SELECT
-	type::thing('user', id) AS record,
-	type::is::string(name) AS is_str,
-	type::is::number(age) AS is_num
+	type::record('user', id) AS record,
+	type::is_string(name) AS is_str,
+	type::is_number(age) AS is_num
 FROM data;
 
 -- Crypto
@@ -79,7 +79,9 @@ SELECT crypto::argon2::generate(password) AS hashed FROM input;
 SELECT
 	rand::uuid::v4() AS id,
 	rand::string(16) AS token,
-	rand::int(1, 100) AS random_number;
+	rand::int(1, 100) AS random_number
+FROM ONLY {};
+
 
 -- Count and aggregation
 SELECT

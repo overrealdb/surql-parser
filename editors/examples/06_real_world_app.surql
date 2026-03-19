@@ -12,7 +12,7 @@ USE NS social DB main;
 
 DEFINE TABLE user SCHEMAFULL;
 DEFINE FIELD username ON user TYPE string ASSERT string::len($value) >= 3;
-DEFINE FIELD email ON user TYPE string ASSERT string::is::email($value);
+DEFINE FIELD email ON user TYPE string ASSERT string::is_email($value);
 DEFINE FIELD display_name ON user TYPE option<string>;
 DEFINE FIELD bio ON user TYPE option<string>;
 DEFINE FIELD avatar_url ON user TYPE option<string>;

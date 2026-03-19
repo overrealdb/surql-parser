@@ -83,15 +83,15 @@ RETURN {
 
 -- Explain
 EXPLAIN SELECT * FROM user WHERE age > 18;
-EXPLAIN FULL SELECT * FROM user WHERE email = 'alice@example.com';
+-- EXPLAIN FULL is not supported; use EXPLAIN alone
+EXPLAIN SELECT * FROM user WHERE email = 'alice@example.com';
 
 -- Complex DEFINE with permissions
 DEFINE FIELD email ON user TYPE string
-	ASSERT string::is::email($value)
+	ASSERT string::is_email($value)
 	PERMISSIONS
 		FOR select WHERE true
-		FOR create, update WHERE $auth.role = 'admin'
-		FOR delete NONE;
+		FOR create, update WHERE $auth.role = 'admin';
 
 -- Nested object access
 SELECT

@@ -5,7 +5,7 @@
 -- Simple SELECT
 SELECT * FROM user;
 SELECT name, age FROM user WHERE age > 18 ORDER BY name ASC LIMIT 10;
-SELECT count() AS total FROM user GROUP BY country;
+SELECT country, count() AS total FROM user GROUP BY country;
 
 -- CREATE with SET
 CREATE user SET name = 'Alice', age = 30, active = true;
