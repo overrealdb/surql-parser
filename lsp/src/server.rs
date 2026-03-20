@@ -36,6 +36,7 @@ pub struct Backend {
 	schema: RwLock<SchemaGraph>,
 	document_schemas: DashMap<Url, SchemaGraph>,
 	workspace_root: RwLock<Option<PathBuf>>,
+	manifest_scope: RwLock<Option<(String, String)>>,
 	format_enabled: bool,
 	#[cfg(feature = "embedded-db")]
 	embedded: tokio::sync::RwLock<Option<crate::embedded_db::DualEngine>>,
@@ -49,6 +50,7 @@ impl Backend {
 			schema: RwLock::new(SchemaGraph::default()),
 			document_schemas: DashMap::new(),
 			workspace_root: RwLock::new(None),
+			manifest_scope: RwLock::new(None),
 			format_enabled: true,
 			#[cfg(feature = "embedded-db")]
 			embedded: tokio::sync::RwLock::new(None),
@@ -103,7 +105,10 @@ impl Backend {
 			}
 		};
 
-		// Determine current file's NS/DB scope from its document schema
+		// Determine current file's NS/DB scope:
+		// 1. From USE statement in the file (document schema)
+		// 2. From manifest.toml (overshift project)
+		// 3. Default (None, None) = see all unscoped tables
 		let (file_ns, file_db) = self
 			.document_schemas
 			.get(uri)
@@ -111,7 +116,19 @@ impl Backend {
 				ds.table_names()
 					.next()
 					.and_then(|tn| ds.table(tn))
-					.map(|t| (t.ns.clone(), t.db.clone()))
+					.and_then(|t| {
+						if t.ns.is_some() || t.db.is_some() {
+							Some((t.ns.clone(), t.db.clone()))
+						} else {
+							None
+						}
+					})
+			})
+			.or_else(|| {
+				self.manifest_scope.read().ok().and_then(|ms| {
+					ms.as_ref()
+						.map(|(ns, db)| (Some(ns.clone()), Some(db.clone())))
+				})
 			})
 			.unwrap_or((None, None));
 
@@ -342,8 +359,10 @@ impl LanguageServer for Backend {
 		// Auto-detect overshift manifest.toml for NS/DB context
 		if let Ok(root) = self.workspace_root.read()
 			&& let Some(root) = root.as_ref()
+			&& let Some(scope) = detect_overshift_manifest(root)
+			&& let Ok(mut ms) = self.manifest_scope.write()
 		{
-			detect_overshift_manifest(root);
+			*ms = Some(scope);
 		}
 
 		self.rebuild_schema();
@@ -1061,7 +1080,7 @@ fn collect_manifest_files(base: &std::path::Path, dir: &std::path::Path, out: &m
 /// Find the source range of a `record<table_name>` reference.
 /// Detect and log overshift manifest.toml in the workspace.
 /// Looks for manifest.toml in common locations: root, surql/, sql/.
-fn detect_overshift_manifest(root: &std::path::Path) {
+fn detect_overshift_manifest(root: &std::path::Path) -> Option<(String, String)> {
 	let candidates = [
 		root.join("manifest.toml"),
 		root.join("surql/manifest.toml"),
@@ -1072,15 +1091,16 @@ fn detect_overshift_manifest(root: &std::path::Path) {
 			&& let Ok(manifest) = toml::from_str::<toml::Value>(&content)
 			&& let Some(meta) = manifest.get("meta")
 		{
-			let ns = meta.get("ns").and_then(|v| v.as_str()).unwrap_or("?");
-			let db = meta.get("db").and_then(|v| v.as_str()).unwrap_or("?");
+			let ns = meta.get("ns").and_then(|v| v.as_str())?.to_string();
+			let db = meta.get("db").and_then(|v| v.as_str())?.to_string();
 			tracing::info!(
 				"Detected overshift manifest at {}: NS={ns}, DB={db}",
 				path.display()
 			);
-			return;
+			return Some((ns, db));
 		}
 	}
+	None
 }
 
 pub(crate) fn find_record_link_range(source: &str, table_name: &str) -> Range {

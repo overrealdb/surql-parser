@@ -43,30 +43,6 @@ struct ManifestArgs {
 	path: String,
 }
 
-#[derive(Debug, Deserialize)]
-struct OvershiftManifest {
-	meta: OvershiftMeta,
-	#[serde(default)]
-	modules: Vec<OvershiftModule>,
-}
-
-#[derive(Debug, Deserialize)]
-struct OvershiftMeta {
-	ns: String,
-	db: String,
-	system_db: String,
-	#[serde(default)]
-	surrealdb: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct OvershiftModule {
-	name: String,
-	path: String,
-	#[serde(default)]
-	depends_on: Vec<String>,
-}
-
 fn error_result(msg: String) -> Result<CallToolResult, rmcp::ErrorData> {
 	Ok(CallToolResult::error(vec![Content::text(msg)]))
 }
@@ -287,14 +263,9 @@ impl SurqlMcp {
 		&self,
 		Parameters(args): Parameters<ManifestArgs>,
 	) -> Result<CallToolResult, rmcp::ErrorData> {
-		let manifest_path = PathBuf::from(&args.path).join("manifest.toml");
-		let content = match std::fs::read_to_string(&manifest_path) {
-			Ok(c) => c,
-			Err(e) => return error_result(format!("Cannot read {}: {e}", manifest_path.display())),
-		};
-		let manifest: OvershiftManifest = match toml::from_str(&content) {
+		let manifest = match overshift::Manifest::load(&args.path) {
 			Ok(m) => m,
-			Err(e) => return error_result(format!("Invalid manifest.toml: {e}")),
+			Err(e) => return error_result(format!("Cannot load manifest: {e}")),
 		};
 
 		let mut output = format!(
@@ -320,21 +291,89 @@ impl SurqlMcp {
 			}
 		}
 
-		// Count migration files
-		let migrations_dir = PathBuf::from(&args.path).join("migrations");
-		if migrations_dir.is_dir() {
-			let count = std::fs::read_dir(&migrations_dir)
-				.map(|e| {
-					e.filter_map(|e| e.ok())
-						.filter(|e| e.path().extension().is_some_and(|ext| ext == "surql"))
-						.count()
-				})
-				.unwrap_or(0);
-			if count > 0 {
-				output.push_str(&format!("\n**{count} migration(s)** in `migrations/`\n"));
+		// Discover migrations via overshift
+		let migrations = overshift::migration::discover_migrations(
+			manifest.root_path().unwrap_or(std::path::Path::new(".")),
+		);
+		match migrations {
+			Ok(migs) if !migs.is_empty() => {
+				output.push_str(&format!("\n**{} migration(s):**\n", migs.len()));
+				for m in &migs {
+					output.push_str(&format!("- `{}` ({})\n", m.name, &m.checksum[..8]));
+				}
+			}
+			_ => {}
+		}
+
+		Ok(CallToolResult::success(vec![Content::text(output)]))
+	}
+
+	#[tool(
+		name = "load_manifest",
+		description = "Load an overshift project into the playground DB: applies schema modules then migrations in order"
+	)]
+	async fn load_manifest(
+		&self,
+		Parameters(args): Parameters<ManifestArgs>,
+	) -> Result<CallToolResult, rmcp::ErrorData> {
+		let manifest = match overshift::Manifest::load(&args.path) {
+			Ok(m) => m,
+			Err(e) => return error_result(format!("Cannot load manifest: {e}")),
+		};
+
+		// Reset DB
+		let db = self.db.read().await;
+		db.query("REMOVE DATABASE default").await.ok();
+		db.use_ns(&manifest.meta.ns)
+			.use_db(&manifest.meta.db)
+			.await
+			.ok();
+
+		let mut applied = 0;
+		let mut errors = Vec::new();
+
+		// Apply schema modules first
+		let modules = overshift::schema::load_schema_modules(&manifest).unwrap_or_default();
+		for module in &modules {
+			match db.query(&module.content).await {
+				Ok(r) => match r.check() {
+					Ok(_) => applied += 1,
+					Err(e) => errors.push(format!("schema/{}: {e}", module.name)),
+				},
+				Err(e) => errors.push(format!("schema/{}: {e}", module.name)),
 			}
 		}
 
+		// Then migrations
+		let migrations = overshift::migration::discover_migrations(
+			manifest.root_path().unwrap_or(std::path::Path::new(".")),
+		)
+		.unwrap_or_default();
+		for mig in &migrations {
+			match db.query(mig.content.as_str()).await {
+				Ok(r) => match r.check() {
+					Ok(_) => applied += 1,
+					Err(e) => errors.push(format!("{}: {e}", mig.name)),
+				},
+				Err(e) => errors.push(format!("{}: {e}", mig.name)),
+			}
+		}
+
+		let mut output = format!(
+			"Loaded overshift project `{}` (NS={}, DB={})\n{} schema module(s) + {} migration(s) = {applied} applied",
+			args.path,
+			manifest.meta.ns,
+			manifest.meta.db,
+			modules.len(),
+			migrations.len()
+		);
+		if !errors.is_empty() {
+			output.push_str(&format!(
+				"\n\n**Errors ({}):**\n{}",
+				errors.len(),
+				errors.join("\n")
+			));
+		}
 		Ok(CallToolResult::success(vec![Content::text(output)]))
 	}
 
