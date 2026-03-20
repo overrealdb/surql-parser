@@ -323,6 +323,7 @@ impl SchemaGraph {
 		}
 		self.functions.extend(other.functions);
 		self.params.extend(other.params);
+		self.rebuild_field_index();
 	}
 
 	pub fn from_definitions(defs: &crate::SchemaDefinitions) -> Self {
@@ -377,7 +378,9 @@ impl SchemaGraph {
 			};
 
 			if let Some(table) = graph.tables.get_mut(&table_name) {
-				table.fields.push(def);
+				if !table.fields.iter().any(|f| f.name == def.name) {
+					table.fields.push(def);
+				}
 			} else {
 				graph.tables.insert(
 					table_name.clone(),
