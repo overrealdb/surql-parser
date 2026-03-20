@@ -694,28 +694,28 @@ mod hover {
 
 #[cfg(test)]
 mod formatting {
-	use crate::formatting;
+	use crate::formatting::format_document_for_test as format_document;
 
 	#[test]
 	fn formats_valid_sql() {
-		assert!(formatting::format_document("SELECT  *   FROM   user").is_some());
+		assert!(format_document("SELECT  *   FROM   user").is_some());
 	}
 
 	#[test]
 	fn returns_none_for_invalid_sql() {
-		assert!(formatting::format_document("SELEC * FORM user").is_none());
+		assert!(format_document("SELEC * FORM user").is_none());
 	}
 
 	#[test]
 	fn no_edit_when_already_formatted() {
 		let ast = surql_parser::parse("SELECT * FROM user").unwrap();
 		let formatted = surql_parser::format(&ast);
-		assert!(formatting::format_document(&formatted).is_none());
+		assert!(format_document(&formatted).is_none());
 	}
 
 	#[test]
 	fn returns_single_text_edit() {
-		if let Some(edits) = formatting::format_document("SELECT  *   FROM   user") {
+		if let Some(edits) = format_document("SELECT  *   FROM   user") {
 			assert_eq!(edits.len(), 1);
 			assert_eq!(edits[0].range.start.line, 0);
 			assert_eq!(edits[0].range.start.character, 0);
@@ -724,25 +724,25 @@ mod formatting {
 
 	#[test]
 	fn multistatement_formatting() {
-		assert!(formatting::format_document("SELECT * FROM a;SELECT * FROM b").is_some());
+		assert!(format_document("SELECT * FROM a;SELECT * FROM b").is_some());
 	}
 
 	#[test]
 	fn empty_input_returns_none() {
 		// Empty parses as valid empty AST → format produces empty → no edit needed
-		assert!(formatting::format_document("").is_none());
+		assert!(format_document("").is_none());
 	}
 
 	#[test]
 	fn preserves_semicolons() {
-		if let Some(edits) = formatting::format_document("SELECT * FROM a ; SELECT * FROM b") {
+		if let Some(edits) = format_document("SELECT * FROM a ; SELECT * FROM b") {
 			assert!(edits[0].new_text.contains(';'));
 		}
 	}
 
 	#[test]
 	fn define_table_formatting() {
-		let result = formatting::format_document("DEFINE  TABLE  user  SCHEMAFULL");
+		let result = format_document("DEFINE  TABLE  user  SCHEMAFULL");
 		// Extra spaces should be normalized by formatter
 		assert!(result.is_some(), "should produce a formatting edit");
 	}
@@ -836,7 +836,7 @@ mod keywords {
 mod edge_cases {
 	use crate::completion;
 	use crate::diagnostics;
-	use crate::formatting;
+	use crate::formatting::format_document_for_test as format_document;
 	use crate::server::word_at_position;
 	use tower_lsp::lsp_types::Position;
 
@@ -921,7 +921,7 @@ mod edge_cases {
 	#[test]
 	fn format_whitespace_returns_none_or_edit() {
 		// Whitespace-only may parse as empty or fail — either way, no crash
-		let result = formatting::format_document("   \n\t\n  ");
+		let result = format_document("   \n\t\n  ");
 		// Whitespace parses as valid empty AST → format produces empty string
 		// So result is either None (already "formatted") or Some with replacement
 		assert!(result.is_none() || result.unwrap().len() == 1);

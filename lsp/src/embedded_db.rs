@@ -274,7 +274,8 @@ impl DualEngine {
 	}
 }
 
-/// Recursively collect all .surql files from a directory tree, sorted by path.
+/// Recursively collect all .surql files from a directory tree.
+/// Skips known large/irrelevant directories to prevent memory blowup.
 #[cfg(feature = "embedded-db")]
 fn collect_surql_files(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
 	let entries = match std::fs::read_dir(dir) {
@@ -284,6 +285,14 @@ fn collect_surql_files(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
 	for entry in entries.filter_map(|e| e.ok()) {
 		let path = entry.path();
 		if path.is_dir() {
+			let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+			if matches!(
+				name,
+				"target" | "node_modules" | ".git" | "build" | "fixtures" | "dist" | ".cache"
+			) || name.starts_with('.')
+			{
+				continue;
+			}
 			collect_surql_files(&path, out);
 		} else if path.extension().is_some_and(|ext| ext == "surql") {
 			out.push(path);

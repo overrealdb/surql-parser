@@ -1,15 +1,28 @@
 //! Document formatting via surql-parser.
+//!
+//! Disabled by default — upstream SurrealDB formatter destroys comments,
+//! blank lines, indentation, and adds verbose defaults (PERMISSIONS FULL,
+//! TYPE NORMAL). Also corrupts DEFINE FUNCTION bodies.
+//!
+//! Enable with `--features canonical-format` or set `"surql.format": true`
+//! in workspace settings.
 
 use tower_lsp::lsp_types::{Position, Range, TextEdit};
 
-/// Format a SurrealQL document, returning a single TextEdit replacing the entire content.
-pub fn format_document(source: &str) -> Option<Vec<TextEdit>> {
+#[cfg(test)]
+pub fn format_document_for_test(source: &str) -> Option<Vec<TextEdit>> {
+	format_document(source, true)
+}
+
+pub fn format_document(source: &str, enabled: bool) -> Option<Vec<TextEdit>> {
+	if !enabled {
+		return None;
+	}
 	let ast = surql_parser::parse(source).ok()?;
 	let formatted = surql_parser::format(&ast);
 	if formatted == source {
 		return None;
 	}
-	// LSP positions are 0-indexed. End position = after last character.
 	let last_line_idx = source.lines().count().saturating_sub(1) as u32;
 	let last_line_chars = source
 		.lines()

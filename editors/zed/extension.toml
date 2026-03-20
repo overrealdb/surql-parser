@@ -1,7 +1,7 @@
 id = "surrealql"
 name = "SurrealQL"
-description = "SurrealQL language support — syntax highlighting, completions, diagnostics, hover, formatting"
-version = "0.1.1"
+description = "SurrealQL language support — syntax highlighting, completions, diagnostics, hover, formatting, embedded DB playground"
+version = "0.2.0"
 schema_version = 1
 authors = ["overrealdb"]
 repository = "https://github.com/overrealdb/surql-parser"
@@ -13,3 +13,10 @@ rev = "191cc5e250bedf6106c34f65be3e238a0a6f97cb"
 [language_servers.surql-lsp]
 name = "surql-lsp"
 languages = ["SurrealQL", "Rust"]
+
+[context_servers.surql-mcp]
+name = "SurrealQL Playground"
+
+[slash_commands.surql-schema]
+description = "Show SurrealQL schema from workspace .surql files"
+requires_argument = false

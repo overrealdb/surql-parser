@@ -20,7 +20,7 @@ DEFINE FUNCTION fn::user::by_age($min: int, $max: int) -> array {
 	RETURN SELECT * FROM user WHERE age >= $min AND age <= $max;
 };
 
-DEFINE FUNCTION fn::post::publish($title: string, $body: string, $author: record<user>) -> object {
+DEFINE FUNCTION fn::post::publish(   $title: string, $body: string, $author: record<user>) -> object {
 	LET $post = CREATE post SET title = $title, body = $body;
 	RELATE $author->wrote->$post SET published_at = time::now();
 	RETURN $post;

@@ -18,6 +18,7 @@ path = "src/main.rs"
 [features]
 default = []
 embedded-db = ["dep:surrealdb", "dep:anyhow"]
+canonical-format = []
 
 [dependencies]
 surql-parser = { path = "..", version = "0.1" }

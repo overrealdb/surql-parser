@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "tools/transform", "macros", "examples/sample-project", "lsp"]
+members = [".", "tools/transform", "macros", "examples/sample-project", "lsp", "mcp"]
 exclude = ["editors/zed"]
 
 [package]

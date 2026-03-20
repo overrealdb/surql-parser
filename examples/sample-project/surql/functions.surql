@@ -15,3 +15,8 @@ DEFINE FUNCTION fn::user::list() -> array {
 DEFINE FUNCTION fn::user::by_age($min_age: int, $max_age: int) -> array {
 	RETURN SELECT * FROM user WHERE age >= $min_age AND age <= $max_age;
 };
+
+DEFINE
+FUNCTION fn::heh::meh()-> array {
+   RETURN [];
+}

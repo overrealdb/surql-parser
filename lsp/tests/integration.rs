@@ -388,13 +388,11 @@ async fn formatting_valid_document() {
 
 	let resp = server.request_formatting(uri).await;
 	let result = &resp["result"];
+	// Formatting is disabled by default (canonical-format feature off)
 	assert!(
-		result.is_array(),
-		"formatting should return text edits array"
+		result.is_null(),
+		"formatting should return null when disabled"
 	);
-	let edits = result.as_array().unwrap();
-	assert!(!edits.is_empty(), "should have at least one edit");
-	assert!(edits[0]["newText"].is_string());
 
 	server.shutdown().await;
 }

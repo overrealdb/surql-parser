@@ -36,6 +36,7 @@ pub struct Backend {
 	schema: RwLock<SchemaGraph>,
 	document_schemas: DashMap<Url, SchemaGraph>,
 	workspace_root: RwLock<Option<PathBuf>>,
+	format_enabled: bool,
 	#[cfg(feature = "embedded-db")]
 	embedded: tokio::sync::RwLock<Option<crate::embedded_db::DualEngine>>,
 }
@@ -48,12 +49,14 @@ impl Backend {
 			schema: RwLock::new(SchemaGraph::default()),
 			document_schemas: DashMap::new(),
 			workspace_root: RwLock::new(None),
+			format_enabled: cfg!(feature = "canonical-format"),
 			#[cfg(feature = "embedded-db")]
 			embedded: tokio::sync::RwLock::new(None),
 		}
 	}
 
 	/// Rebuild the workspace schema graph from all .surql files.
+	/// Also writes `surql-lsp-out/files.json` manifest for the Zed extension.
 	fn rebuild_schema(&self) {
 		let root = match self.workspace_root.read() {
 			Ok(r) => r.clone(),
@@ -80,6 +83,7 @@ impl Backend {
 					tracing::warn!("Failed to rebuild schema: {e}");
 				}
 			}
+			write_file_manifest(&root);
 		} else {
 			tracing::debug!("rebuild_schema: no workspace root set");
 		}
@@ -180,39 +184,6 @@ impl Backend {
 				}
 			}
 
-			// Runtime validation via embedded SurrealDB (if available).
-			// Only for pure DML files — files with DDL (DEFINE/REMOVE) are schema
-			// definitions that cause "already exists" errors when re-executed.
-			#[cfg(feature = "embedded-db")]
-			{
-				let has_ddl = source.split(';').any(|stmt| {
-					let trimmed = stmt.trim().to_uppercase();
-					trimmed.starts_with("DEFINE ") || trimmed.starts_with("REMOVE ")
-				});
-
-				if !has_ddl && let Some(ref engine) = *self.embedded.read().await {
-					let runtime_errors = engine.validate_query(&source).await;
-					for err in runtime_errors {
-						all_diagnostics.push(Diagnostic {
-							range: Range {
-								start: Position {
-									line: 0,
-									character: 0,
-								},
-								end: Position {
-									line: 0,
-									character: 0,
-								},
-							},
-							severity: Some(DiagnosticSeverity::WARNING),
-							source: Some("surql-runtime".into()),
-							message: err,
-							..Default::default()
-						});
-					}
-				}
-			}
-
 			self.client
 				.publish_diagnostics(uri, all_diagnostics, None)
 				.await;
@@ -271,11 +242,13 @@ impl Backend {
 #[tower_lsp::async_trait]
 impl LanguageServer for Backend {
 	async fn initialize(&self, params: InitializeParams) -> Result<InitializeResult> {
-		// Store workspace root
+		// Store workspace root and write file manifest early (before initialized)
+		// so the Zed extension can discover .surql files via slash commands
 		if let Some(root) = params.root_uri
 			&& let Ok(path) = root.to_file_path()
 			&& let Ok(mut wr) = self.workspace_root.write()
 		{
+			write_file_manifest(&path);
 			*wr = Some(path);
 		}
 
@@ -384,7 +357,7 @@ impl LanguageServer for Backend {
 			Some(s) => s,
 			None => return Ok(None),
 		};
-		Ok(formatting::format_document(&source))
+		Ok(formatting::format_document(&source, self.format_enabled))
 	}
 
 	async fn completion(&self, params: CompletionParams) -> Result<Option<CompletionResponse>> {
@@ -840,6 +813,102 @@ impl LanguageServer for Backend {
 		self.documents.close(&uri);
 		self.document_schemas.remove(&uri);
 		self.client.publish_diagnostics(uri, vec![], None).await;
+	}
+}
+
+/// Write file manifest and schema cache for the Zed extension.
+///
+/// Writes to two locations:
+/// 1. `surql-lsp-out/files.json` in project root (for general use)
+/// 2. Zed extension work dir (WASM can read via `std::fs` from `.`)
+fn write_file_manifest(root: &std::path::Path) {
+	let mut files = Vec::new();
+	collect_manifest_files(root, root, &mut files);
+	files.sort();
+
+	// Build schema cache content
+	let mut schema_text = String::new();
+	let mut file_count = 0;
+	for rel_path in &files {
+		let full_path = root.join(rel_path);
+		let content = match std::fs::read_to_string(&full_path) {
+			Ok(c) => c,
+			Err(_) => continue,
+		};
+		let mut defs = Vec::new();
+		for line in content.lines() {
+			let trimmed = line.trim().to_uppercase();
+			if trimmed.starts_with("DEFINE TABLE ")
+				|| trimmed.starts_with("DEFINE FIELD ")
+				|| trimmed.starts_with("DEFINE INDEX ")
+				|| trimmed.starts_with("DEFINE EVENT ")
+				|| trimmed.starts_with("DEFINE FUNCTION ")
+			{
+				defs.push(line.trim().to_string());
+			}
+		}
+		if defs.is_empty() {
+			continue;
+		}
+		file_count += 1;
+		schema_text.push_str(&format!("## {rel_path}\n\n```surql\n"));
+		for d in &defs {
+			schema_text.push_str(d);
+			schema_text.push('\n');
+		}
+		schema_text.push_str("```\n\n");
+	}
+	if !schema_text.is_empty() {
+		schema_text = format!("*{file_count} schema file(s)*\n\n{schema_text}");
+	}
+
+	// Write to project root
+	let manifest_dir = root.join("surql-lsp-out");
+	if std::fs::create_dir_all(&manifest_dir).is_ok() {
+		let _ = std::fs::write(
+			manifest_dir.join("files.json"),
+			serde_json::to_string_pretty(&files).unwrap_or_else(|_| "[]".to_string()),
+		);
+		let _ = std::fs::write(manifest_dir.join("schema.md"), &schema_text);
+	}
+
+	// Write to Zed extension work dir (WASM reads from ".")
+	if let Ok(home) = std::env::var("HOME") {
+		let zed_ext_dir = std::path::Path::new(&home)
+			.join("Library/Application Support/Zed/extensions/work/surrealql");
+		if zed_ext_dir.exists() {
+			let _ = std::fs::write(zed_ext_dir.join("schema.md"), &schema_text);
+			tracing::info!("Schema cache written to Zed extension dir");
+		}
+	}
+}
+
+fn collect_manifest_files(base: &std::path::Path, dir: &std::path::Path, out: &mut Vec<String>) {
+	let entries = match std::fs::read_dir(dir) {
+		Ok(e) => e,
+		Err(_) => return,
+	};
+	for entry in entries.filter_map(|e| e.ok()) {
+		let path = entry.path();
+		if path.is_dir() {
+			let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+			if matches!(
+				name,
+				"target"
+					| "node_modules"
+					| ".git" | "build"
+					| "fixtures" | "dist"
+					| ".cache" | "surql-lsp-out"
+			) || name.starts_with('.')
+			{
+				continue;
+			}
+			collect_manifest_files(base, &path, out);
+		} else if path.extension().is_some_and(|ext| ext == "surql")
+			&& let Ok(rel) = path.strip_prefix(base)
+		{
+			out.push(rel.to_string_lossy().to_string());
+		}
 	}
 }
 
