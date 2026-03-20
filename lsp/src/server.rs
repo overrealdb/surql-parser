@@ -159,9 +159,10 @@ impl Backend {
 			#[allow(unused_mut)]
 			let mut all_diagnostics = result.diagnostics;
 
-			// Schema-aware: warn about undefined table references in DML
+			// Schema-aware diagnostics
 			let schema = self.effective_schema(&uri);
 			if schema.table_names().count() > 0 {
+				// Warn about undefined table references in DML
 				for table_ref in context::extract_table_references(&source) {
 					if schema.table(&table_ref.name).is_none() {
 						all_diagnostics.push(Diagnostic {
@@ -183,6 +184,29 @@ impl Backend {
 							),
 							..Default::default()
 						});
+					}
+				}
+
+				// Cross-file: warn about record links to undefined tables
+				if let Some(doc_schema) = self.document_schemas.get(&uri) {
+					for table_name in doc_schema.table_names() {
+						for field in doc_schema.fields_of(table_name) {
+							for link in &field.record_links {
+								if schema.table(link).is_none() {
+									let range = find_record_link_range(&source, link);
+									all_diagnostics.push(Diagnostic {
+										range,
+										severity: Some(DiagnosticSeverity::WARNING),
+										source: Some("surql-schema".into()),
+										message: format!(
+											"Record link to '{}' but table is not defined",
+											link
+										),
+										..Default::default()
+									});
+								}
+							}
+						}
 					}
 				}
 			}
@@ -1007,6 +1031,41 @@ fn collect_manifest_files(base: &std::path::Path, dir: &std::path::Path, out: &m
 		{
 			out.push(rel.to_string_lossy().to_string());
 		}
+	}
+}
+
+/// Find the source range of a `record<table_name>` reference.
+pub(crate) fn find_record_link_range(source: &str, table_name: &str) -> Range {
+	let search = format!("record<{table_name}>");
+	let search_upper = format!("record<{}>", table_name.to_uppercase());
+	for (line_num, line) in source.lines().enumerate() {
+		let upper_line = line.to_uppercase();
+		for pattern in [&search, &search_upper] {
+			let upper_pattern = pattern.to_uppercase();
+			if let Some(col) = upper_line.find(&upper_pattern) {
+				let inner_start = col + "record<".len();
+				return Range {
+					start: Position {
+						line: line_num as u32,
+						character: inner_start as u32,
+					},
+					end: Position {
+						line: line_num as u32,
+						character: (inner_start + table_name.len()) as u32,
+					},
+				};
+			}
+		}
+	}
+	Range {
+		start: Position {
+			line: 0,
+			character: 0,
+		},
+		end: Position {
+			line: 0,
+			character: 0,
+		},
 	}
 }
 

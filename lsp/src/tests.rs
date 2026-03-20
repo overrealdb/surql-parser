@@ -3641,3 +3641,39 @@ DEFINE EVENT user_created ON user WHEN $event = 'CREATE' THEN {
 		assert_eq!(refs[0].name, "user");
 	}
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+// CROSS-FILE RECORD LINK DIAGNOSTICS
+// ═══════════════════════════════════════════════════════════════════════
+
+#[cfg(test)]
+mod cross_file_record_links {
+	use crate::server::find_record_link_range;
+
+	#[test]
+	fn should_find_record_link_range() {
+		let source = "DEFINE FIELD author ON post TYPE record<user>;";
+		let range = find_record_link_range(source, "user");
+		assert_eq!(range.start.line, 0);
+		assert_eq!(
+			range.start.character,
+			"DEFINE FIELD author ON post TYPE record<".len() as u32
+		);
+		assert_eq!(range.end.character, range.start.character + 4); // "user".len()
+	}
+
+	#[test]
+	fn should_find_record_link_case_insensitive() {
+		let source = "DEFINE FIELD author ON post TYPE RECORD<User>;";
+		let range = find_record_link_range(source, "User");
+		assert!(range.start.character > 0, "should find the link");
+	}
+
+	#[test]
+	fn should_return_zero_range_for_missing() {
+		let source = "DEFINE TABLE user SCHEMAFULL;";
+		let range = find_record_link_range(source, "nonexistent");
+		assert_eq!(range.start.line, 0);
+		assert_eq!(range.start.character, 0);
+	}
+}
