@@ -21,6 +21,14 @@ struct ExecArgs {
 struct LoadProjectArgs {
 	#[schemars(description = "Path to directory containing .surql files")]
 	path: String,
+	#[schemars(description = "Reset database before loading (default: true)")]
+	clean: Option<bool>,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+struct LoadFileArgs {
+	#[schemars(description = "Path to a single .surql file to execute")]
+	path: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -94,7 +102,7 @@ impl SurqlMcp {
 
 	#[tool(
 		name = "load_project",
-		description = "Load .surql files from a directory as migrations (sorted by name, recursive)"
+		description = "Load .surql files from a directory into the database. Resets DB first by default. Files are loaded in priority order: migrations/ and schema files first, then examples/"
 	)]
 	async fn load_project(
 		&self,
@@ -105,15 +113,23 @@ impl SurqlMcp {
 			return error_result(format!("Not a directory: {}", args.path));
 		}
 
+		let clean = args.clean.unwrap_or(true);
+		if clean {
+			let db = self.db.read().await;
+			db.query("REMOVE DATABASE default").await.ok();
+			db.use_ns("default").use_db("default").await.ok();
+		}
+
 		let mut surql_files = Vec::new();
 		collect_surql_files(&dir, &mut surql_files);
-		surql_files.sort();
 
 		if surql_files.is_empty() {
 			return Ok(CallToolResult::success(vec![Content::text(
 				"No .surql files found",
 			)]));
 		}
+
+		surql_files.sort_by_key(|p| file_load_priority(p));
 
 		let db = self.db.read().await;
 		let mut applied = 0;
@@ -137,14 +153,47 @@ impl SurqlMcp {
 		}
 
 		let mut output = format!(
-			"Loaded {applied}/{} files from `{}`",
+			"Loaded {applied}/{} files from `{}`{}",
 			surql_files.len(),
-			args.path
+			args.path,
+			if clean { " (clean)" } else { "" }
 		);
 		if !errors.is_empty() {
-			output.push_str(&format!("\n\n**Errors:**\n{}", errors.join("\n")));
+			output.push_str(&format!(
+				"\n\n**Errors ({}):**\n{}",
+				errors.len(),
+				errors.join("\n")
+			));
 		}
 		Ok(CallToolResult::success(vec![Content::text(output)]))
+	}
+
+	#[tool(
+		name = "load_file",
+		description = "Execute a single .surql file against the database"
+	)]
+	async fn load_file(
+		&self,
+		Parameters(args): Parameters<LoadFileArgs>,
+	) -> Result<CallToolResult, rmcp::ErrorData> {
+		let path = PathBuf::from(&args.path);
+		let content = match std::fs::read_to_string(&path) {
+			Ok(c) => c,
+			Err(e) => return error_result(format!("Cannot read {}: {e}", args.path)),
+		};
+		let db = self.db.read().await;
+		match db.query(&content).await {
+			Ok(response) => match response.check() {
+				Ok(_) => Ok(CallToolResult::success(vec![Content::text(format!(
+					"Executed `{}`",
+					path.file_name()
+						.and_then(|n| n.to_str())
+						.unwrap_or(&args.path)
+				))])),
+				Err(e) => error_result(format!("{e}")),
+			},
+			Err(e) => error_result(format!("{e}")),
+		}
 	}
 
 	#[tool(
@@ -233,6 +282,37 @@ impl rmcp::handler::server::ServerHandler for SurqlMcp {
 			..Default::default()
 		}
 	}
+}
+
+/// Assign load priority based on parent directories and file name.
+/// migrations/ first, then root schema/function files, then everything else, examples last.
+fn file_load_priority(path: &std::path::Path) -> (u8, std::path::PathBuf) {
+	let parent_names: Vec<String> = path
+		.ancestors()
+		.filter_map(|a| a.file_name())
+		.map(|n| n.to_string_lossy().to_lowercase())
+		.collect();
+
+	let in_dir = |name: &str| parent_names.iter().any(|d| d.contains(name));
+
+	let file_stem = path
+		.file_stem()
+		.and_then(|n| n.to_str())
+		.unwrap_or("")
+		.to_lowercase();
+
+	let priority = if in_dir("example") || in_dir("seed") || in_dir("test") {
+		4
+	} else if in_dir("migration") {
+		0
+	} else if file_stem.contains("schema") {
+		1
+	} else if file_stem.contains("function") {
+		2
+	} else {
+		3
+	};
+	(priority, path.to_path_buf())
 }
 
 fn collect_surql_files(dir: &std::path::Path, out: &mut Vec<PathBuf>) {
@@ -339,6 +419,7 @@ mod tests {
 		let result = server
 			.load_project(Parameters(LoadProjectArgs {
 				path: dir.path().to_string_lossy().to_string(),
+				clean: Some(true),
 			}))
 			.await
 			.unwrap();
@@ -360,6 +441,7 @@ mod tests {
 		let result = server
 			.load_project(Parameters(LoadProjectArgs {
 				path: "/nonexistent/path".into(),
+				clean: None,
 			}))
 			.await
 			.unwrap();
@@ -425,6 +507,47 @@ mod tests {
 			result.is_error == Some(true),
 			"expected error after reset (table gone)"
 		);
+	}
+
+	#[tokio::test]
+	async fn should_load_file_single() {
+		let dir = TempDir::new().unwrap();
+		let file = dir.path().join("schema.surql");
+		fs::write(&file, "DEFINE TABLE test SCHEMAFULL;").unwrap();
+
+		let server = SurqlMcp::new().await.unwrap();
+		let result = server
+			.load_file(Parameters(LoadFileArgs {
+				path: file.to_string_lossy().to_string(),
+			}))
+			.await
+			.unwrap();
+		let text = result_text(&result);
+		assert!(text.contains("Executed"), "expected executed in: {text}");
+	}
+
+	#[tokio::test]
+	async fn should_load_file_report_error_for_missing() {
+		let server = SurqlMcp::new().await.unwrap();
+		let result = server
+			.load_file(Parameters(LoadFileArgs {
+				path: "/nonexistent.surql".into(),
+			}))
+			.await
+			.unwrap();
+		assert!(result.is_error == Some(true));
+	}
+
+	#[test]
+	fn should_prioritize_migrations_over_examples() {
+		let migrations = PathBuf::from("/project/migrations/001.surql");
+		let schema = PathBuf::from("/project/schema.surql");
+		let example = PathBuf::from("/project/examples/demo.surql");
+		let other = PathBuf::from("/project/queries.surql");
+
+		assert!(file_load_priority(&migrations) < file_load_priority(&schema));
+		assert!(file_load_priority(&schema) < file_load_priority(&other));
+		assert!(file_load_priority(&other) < file_load_priority(&example));
 	}
 
 	fn result_text(result: &CallToolResult) -> String {
