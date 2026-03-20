@@ -329,3 +329,27 @@ fn find_field_index_deduplicates_on_merge() {
 	let results = sg1.find_field("name");
 	assert_eq!(results.len(), 1);
 }
+
+#[test]
+fn should_track_ns_db_from_use_statement() {
+	let sg = SchemaGraph::from_source(
+		"
+		USE NS production DB main;
+		DEFINE TABLE user SCHEMAFULL;
+		DEFINE FIELD name ON user TYPE string;
+	",
+	)
+	.unwrap();
+
+	let table = sg.table("user").unwrap();
+	assert_eq!(table.ns.as_deref(), Some("production"));
+	assert_eq!(table.db.as_deref(), Some("main"));
+}
+
+#[test]
+fn should_default_ns_db_to_none() {
+	let sg = SchemaGraph::from_source("DEFINE TABLE user SCHEMAFULL;").unwrap();
+	let table = sg.table("user").unwrap();
+	assert_eq!(table.ns, None);
+	assert_eq!(table.db, None);
+}

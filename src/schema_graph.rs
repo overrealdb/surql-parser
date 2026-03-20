@@ -47,6 +47,8 @@ pub struct TableDef {
 	pub indexes: Vec<IndexDef>,
 	pub events: Vec<EventDef>,
 	pub source: Option<SourceLocation>,
+	pub ns: Option<String>,
+	pub db: Option<String>,
 }
 
 /// A parsed field definition.
@@ -339,6 +341,8 @@ impl SchemaGraph {
 					indexes: Vec::new(),
 					events: Vec::new(),
 					source: None,
+					ns: defs.current_ns.clone(),
+					db: defs.current_db.clone(),
 				},
 			);
 		}
@@ -386,6 +390,8 @@ impl SchemaGraph {
 						indexes: Vec::new(),
 						events: Vec::new(),
 						source: None,
+						ns: defs.current_ns.clone(),
+						db: defs.current_db.clone(),
 					},
 				);
 			}

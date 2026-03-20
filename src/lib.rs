@@ -90,6 +90,9 @@ pub struct SchemaDefinitions {
 	pub params: Vec<define::DefineParamStatement>,
 	pub users: Vec<define::DefineUserStatement>,
 	pub accesses: Vec<define::DefineAccessStatement>,
+	/// Current NS/DB context from USE statements (tracked during extraction)
+	pub current_ns: Option<String>,
+	pub current_db: Option<String>,
 }
 
 /// Extract all DEFINE statements from a SurrealQL string.
@@ -114,29 +117,7 @@ pub struct SchemaDefinitions {
 /// ```
 pub fn extract_definitions(input: &str) -> anyhow::Result<SchemaDefinitions> {
 	let ast = parse(input)?;
-	let mut defs = SchemaDefinitions::default();
-
-	for top in &ast.expressions {
-		if let upstream::sql::ast::TopLevelExpr::Expr(Expr::Define(stmt)) = top {
-			use define::DefineStatement as DS;
-			match stmt.as_ref() {
-				DS::Namespace(s) => defs.namespaces.push(s.clone()),
-				DS::Database(s) => defs.databases.push(s.clone()),
-				DS::Table(s) => defs.tables.push(s.clone()),
-				DS::Field(s) => defs.fields.push(s.clone()),
-				DS::Index(s) => defs.indexes.push(s.clone()),
-				DS::Function(s) => defs.functions.push(s.clone()),
-				DS::Analyzer(s) => defs.analyzers.push(s.clone()),
-				DS::Event(s) => defs.events.push(s.clone()),
-				DS::Param(s) => defs.params.push(s.clone()),
-				DS::User(s) => defs.users.push(s.clone()),
-				DS::Access(s) => defs.accesses.push(s.clone()),
-				_ => {} // Config, Api, Bucket, Sequence, Module, Model — less common
-			}
-		}
-	}
-
-	Ok(defs)
+	extract_definitions_from_ast(&ast.expressions)
 }
 
 /// Extract definitions from pre-parsed statements (e.g., from error-recovering parser).
@@ -146,6 +127,18 @@ pub fn extract_definitions_from_ast(
 	let mut defs = SchemaDefinitions::default();
 
 	for top in stmts {
+		// Track USE NS/DB context changes
+		if let upstream::sql::ast::TopLevelExpr::Use(use_stmt) = top {
+			let (ns, db) = extract_use_context(use_stmt);
+			if let Some(ns) = ns {
+				defs.current_ns = Some(ns);
+			}
+			if let Some(db) = db {
+				defs.current_db = Some(db);
+			}
+			continue;
+		}
+
 		if let upstream::sql::ast::TopLevelExpr::Expr(Expr::Define(stmt)) = top {
 			use define::DefineStatement as DS;
 			match stmt.as_ref() {
@@ -166,6 +159,26 @@ pub fn extract_definitions_from_ast(
 	}
 
 	Ok(defs)
+}
+
+fn extract_use_context(
+	use_stmt: &upstream::sql::statements::r#use::UseStatement,
+) -> (Option<String>, Option<String>) {
+	use surrealdb_types::{SqlFormat, ToSql};
+	use upstream::sql::statements::r#use::UseStatement;
+
+	fn expr_to_string(expr: &Expr) -> String {
+		let mut s = String::new();
+		expr.fmt_sql(&mut s, SqlFormat::SingleLine);
+		s
+	}
+
+	match use_stmt {
+		UseStatement::Ns(ns) => (Some(expr_to_string(ns)), None),
+		UseStatement::Db(db) => (None, Some(expr_to_string(db))),
+		UseStatement::NsDb(ns, db) => (Some(expr_to_string(ns)), Some(expr_to_string(db))),
+		UseStatement::Default => (None, None),
+	}
 }
 
 /// List all function names defined in a SurrealQL string.
