@@ -697,34 +697,34 @@ mod formatting {
 	use crate::formatting::format_document_for_test as format_document;
 
 	#[test]
-	fn formats_valid_sql() {
-		assert!(format_document("SELECT  *   FROM   user").is_some());
+	fn formats_lowercase_keywords() {
+		assert!(format_document("select  *   from   user").is_some());
 	}
 
 	#[test]
-	fn returns_none_for_invalid_sql() {
-		assert!(format_document("SELEC * FORM user").is_none());
+	fn returns_none_when_all_keywords_uppercase() {
+		assert!(format_document("SELECT * FROM user").is_none());
 	}
 
 	#[test]
-	fn no_edit_when_already_formatted() {
-		let ast = surql_parser::parse("SELECT * FROM user").unwrap();
-		let formatted = surql_parser::format(&ast);
-		assert!(format_document(&formatted).is_none());
+	fn uppercases_lowercase_keywords() {
+		let edits = format_document("select * from user").unwrap();
+		assert!(edits.len() >= 2, "should have edits for select and from");
+		assert_eq!(edits[0].new_text, "SELECT");
 	}
 
 	#[test]
-	fn returns_single_text_edit() {
-		if let Some(edits) = format_document("SELECT  *   FROM   user") {
-			assert_eq!(edits.len(), 1);
-			assert_eq!(edits[0].range.start.line, 0);
-			assert_eq!(edits[0].range.start.character, 0);
-		}
+	fn returns_per_keyword_edits() {
+		let edits = format_document("select * from user where age > 18").unwrap();
+		let texts: Vec<&str> = edits.iter().map(|e| e.new_text.as_str()).collect();
+		assert!(texts.contains(&"SELECT"));
+		assert!(texts.contains(&"FROM"));
+		assert!(texts.contains(&"WHERE"));
 	}
 
 	#[test]
-	fn multistatement_formatting() {
-		assert!(format_document("SELECT * FROM a;SELECT * FROM b").is_some());
+	fn preserves_already_uppercase() {
+		assert!(format_document("SELECT * FROM user WHERE active = true").is_none());
 	}
 
 	#[test]
@@ -741,10 +741,9 @@ mod formatting {
 	}
 
 	#[test]
-	fn define_table_formatting() {
-		let result = format_document("DEFINE  TABLE  user  SCHEMAFULL");
-		// Extra spaces should be normalized by formatter
-		assert!(result.is_some(), "should produce a formatting edit");
+	fn define_table_lowercase_keywords() {
+		let result = format_document("define  table  user  schemafull");
+		assert!(result.is_some(), "should uppercase keywords");
 	}
 }
 

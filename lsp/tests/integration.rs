@@ -380,7 +380,7 @@ async fn formatting_valid_document() {
 	server.initialize().await;
 
 	let uri = "file:///fmt.surql";
-	server.open_document(uri, "SELECT  *   FROM   user").await;
+	server.open_document(uri, "select * from user").await;
 	let _ = recv_until(&mut server.from_server, |msg| {
 		msg.get("method") == Some(&json!("textDocument/publishDiagnostics"))
 	})
@@ -388,11 +388,13 @@ async fn formatting_valid_document() {
 
 	let resp = server.request_formatting(uri).await;
 	let result = &resp["result"];
-	// Formatting is disabled by default (canonical-format feature off)
 	assert!(
-		result.is_null(),
-		"formatting should return null when disabled"
+		result.is_array(),
+		"keyword formatter should return edits for lowercase keywords"
 	);
+	let edits = result.as_array().unwrap();
+	assert!(!edits.is_empty(), "should have at least one keyword edit");
+	assert!(edits[0]["newText"].is_string());
 
 	server.shutdown().await;
 }

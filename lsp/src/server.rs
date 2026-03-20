@@ -49,7 +49,7 @@ impl Backend {
 			schema: RwLock::new(SchemaGraph::default()),
 			document_schemas: DashMap::new(),
 			workspace_root: RwLock::new(None),
-			format_enabled: cfg!(feature = "canonical-format"),
+			format_enabled: true,
 			#[cfg(feature = "embedded-db")]
 			embedded: tokio::sync::RwLock::new(None),
 		}
