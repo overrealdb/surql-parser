@@ -37,6 +37,36 @@ struct DescribeArgs {
 	table: String,
 }
 
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+struct ManifestArgs {
+	#[schemars(description = "Path to directory containing manifest.toml (overshift project)")]
+	path: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct OvershiftManifest {
+	meta: OvershiftMeta,
+	#[serde(default)]
+	modules: Vec<OvershiftModule>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OvershiftMeta {
+	ns: String,
+	db: String,
+	system_db: String,
+	#[serde(default)]
+	surrealdb: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OvershiftModule {
+	name: String,
+	path: String,
+	#[serde(default)]
+	depends_on: Vec<String>,
+}
+
 fn error_result(msg: String) -> Result<CallToolResult, rmcp::ErrorData> {
 	Ok(CallToolResult::error(vec![Content::text(msg)]))
 }
@@ -247,6 +277,65 @@ impl SurqlMcp {
 			Ok(None) => error_result(format!("Table '{}' not found", args.table)),
 			Err(e) => error_result(format!("Failed: {e}")),
 		}
+	}
+
+	#[tool(
+		name = "manifest",
+		description = "Read an overshift manifest.toml and show project configuration (namespace, database, modules, migrations)"
+	)]
+	async fn manifest(
+		&self,
+		Parameters(args): Parameters<ManifestArgs>,
+	) -> Result<CallToolResult, rmcp::ErrorData> {
+		let manifest_path = PathBuf::from(&args.path).join("manifest.toml");
+		let content = match std::fs::read_to_string(&manifest_path) {
+			Ok(c) => c,
+			Err(e) => return error_result(format!("Cannot read {}: {e}", manifest_path.display())),
+		};
+		let manifest: OvershiftManifest = match toml::from_str(&content) {
+			Ok(m) => m,
+			Err(e) => return error_result(format!("Invalid manifest.toml: {e}")),
+		};
+
+		let mut output = format!(
+			"**overshift manifest** from `{}`\n\n\
+			 - **Namespace:** `{}`\n\
+			 - **Database:** `{}`\n\
+			 - **System DB:** `{}`\n",
+			args.path, manifest.meta.ns, manifest.meta.db, manifest.meta.system_db
+		);
+		if let Some(ver) = &manifest.meta.surrealdb {
+			output.push_str(&format!("- **SurrealDB:** `{ver}`\n"));
+		}
+
+		if !manifest.modules.is_empty() {
+			output.push_str(&format!("\n**{} module(s):**\n", manifest.modules.len()));
+			for m in &manifest.modules {
+				let deps = if m.depends_on.is_empty() {
+					String::new()
+				} else {
+					format!(" (depends: {})", m.depends_on.join(", "))
+				};
+				output.push_str(&format!("- `{}` → `{}`{deps}\n", m.name, m.path));
+			}
+		}
+
+		// Count migration files
+		let migrations_dir = PathBuf::from(&args.path).join("migrations");
+		if migrations_dir.is_dir() {
+			let count = std::fs::read_dir(&migrations_dir)
+				.map(|e| {
+					e.filter_map(|e| e.ok())
+						.filter(|e| e.path().extension().is_some_and(|ext| ext == "surql"))
+						.count()
+				})
+				.unwrap_or(0);
+			if count > 0 {
+				output.push_str(&format!("\n**{count} migration(s)** in `migrations/`\n"));
+			}
+		}
+
+		Ok(CallToolResult::success(vec![Content::text(output)]))
 	}
 
 	#[tool(name = "reset", description = "Clear the database and start fresh")]
@@ -548,6 +637,60 @@ mod tests {
 		assert!(file_load_priority(&migrations) < file_load_priority(&schema));
 		assert!(file_load_priority(&schema) < file_load_priority(&other));
 		assert!(file_load_priority(&other) < file_load_priority(&example));
+	}
+
+	#[tokio::test]
+	async fn should_read_overshift_manifest() {
+		let dir = TempDir::new().unwrap();
+		fs::write(
+			dir.path().join("manifest.toml"),
+			r#"
+[meta]
+ns = "myapp"
+db = "main"
+system_db = "_system"
+
+[[modules]]
+name = "auth"
+path = "schema/auth"
+depends_on = []
+"#,
+		)
+		.unwrap();
+		fs::create_dir_all(dir.path().join("migrations")).unwrap();
+		fs::write(
+			dir.path().join("migrations/v001_init.surql"),
+			"DEFINE TABLE user;",
+		)
+		.unwrap();
+
+		let server = SurqlMcp::new().await.unwrap();
+		let result = server
+			.manifest(Parameters(ManifestArgs {
+				path: dir.path().to_string_lossy().to_string(),
+			}))
+			.await
+			.unwrap();
+		let text = result_text(&result);
+		assert!(text.contains("myapp"), "expected ns in: {text}");
+		assert!(text.contains("main"), "expected db in: {text}");
+		assert!(text.contains("auth"), "expected module in: {text}");
+		assert!(
+			text.contains("1 migration"),
+			"expected migrations in: {text}"
+		);
+	}
+
+	#[tokio::test]
+	async fn should_reject_missing_manifest() {
+		let server = SurqlMcp::new().await.unwrap();
+		let result = server
+			.manifest(Parameters(ManifestArgs {
+				path: "/nonexistent".into(),
+			}))
+			.await
+			.unwrap();
+		assert!(result.is_error == Some(true));
 	}
 
 	fn result_text(result: &CallToolResult) -> String {
