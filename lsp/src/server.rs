@@ -322,6 +322,14 @@ impl LanguageServer for Backend {
 
 	async fn initialized(&self, _: InitializedParams) {
 		tracing::info!("SurrealQL LSP initialized");
+
+		// Auto-detect overshift manifest.toml for NS/DB context
+		if let Ok(root) = self.workspace_root.read()
+			&& let Some(root) = root.as_ref()
+		{
+			detect_overshift_manifest(root);
+		}
+
 		self.rebuild_schema();
 
 		#[cfg(feature = "embedded-db")]
@@ -1035,6 +1043,30 @@ fn collect_manifest_files(base: &std::path::Path, dir: &std::path::Path, out: &m
 }
 
 /// Find the source range of a `record<table_name>` reference.
+/// Detect and log overshift manifest.toml in the workspace.
+/// Looks for manifest.toml in common locations: root, surql/, sql/.
+fn detect_overshift_manifest(root: &std::path::Path) {
+	let candidates = [
+		root.join("manifest.toml"),
+		root.join("surql/manifest.toml"),
+		root.join("sql/manifest.toml"),
+	];
+	for path in &candidates {
+		if let Ok(content) = std::fs::read_to_string(path)
+			&& let Ok(manifest) = toml::from_str::<toml::Value>(&content)
+			&& let Some(meta) = manifest.get("meta")
+		{
+			let ns = meta.get("ns").and_then(|v| v.as_str()).unwrap_or("?");
+			let db = meta.get("db").and_then(|v| v.as_str()).unwrap_or("?");
+			tracing::info!(
+				"Detected overshift manifest at {}: NS={ns}, DB={db}",
+				path.display()
+			);
+			return;
+		}
+	}
+}
+
 pub(crate) fn find_record_link_range(source: &str, table_name: &str) -> Range {
 	let search = format!("record<{table_name}>");
 	let search_upper = format!("record<{}>", table_name.to_uppercase());
