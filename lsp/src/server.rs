@@ -93,14 +93,30 @@ impl Backend {
 	}
 
 	/// Get the effective schema for a document: workspace schema + document overlay.
+	/// Applies NS/DB scope filtering based on the current document's context.
 	fn effective_schema(&self, uri: &Url) -> SchemaGraph {
-		let mut schema = match self.schema.read() {
+		let full_schema = match self.schema.read() {
 			Ok(s) => s.clone(),
 			Err(e) => {
 				tracing::error!("schema lock poisoned in effective_schema: {e}");
 				SchemaGraph::default()
 			}
 		};
+
+		// Determine current file's NS/DB scope from its document schema
+		let (file_ns, file_db) = self
+			.document_schemas
+			.get(uri)
+			.and_then(|ds| {
+				ds.table_names()
+					.next()
+					.and_then(|tn| ds.table(tn))
+					.map(|t| (t.ns.clone(), t.db.clone()))
+			})
+			.unwrap_or((None, None));
+
+		let mut schema = full_schema.scoped(file_ns.as_deref(), file_db.as_deref());
+
 		if let Some(doc_schema) = self.document_schemas.get(uri) {
 			schema.merge(doc_schema.clone());
 		}

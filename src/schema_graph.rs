@@ -489,6 +489,25 @@ impl SchemaGraph {
 		}
 	}
 
+	/// Return a filtered schema containing only tables matching the given NS/DB scope.
+	/// Tables with no NS/DB (None) are included in all scopes (default context).
+	pub fn scoped(&self, ns: Option<&str>, db: Option<&str>) -> Self {
+		let tables: HashMap<String, TableDef> = self
+			.tables
+			.iter()
+			.filter(|(_, t)| scope_matches(&t.ns, &t.db, ns, db))
+			.map(|(k, v)| (k.clone(), v.clone()))
+			.collect();
+		let mut graph = Self {
+			tables,
+			functions: self.functions.clone(),
+			params: self.params.clone(),
+			field_index: HashMap::new(),
+		};
+		graph.rebuild_field_index();
+		graph
+	}
+
 	// ─── Lookups ───
 
 	/// Iterate over all table names in the schema.
@@ -585,6 +604,27 @@ fn expr_to_string(expr: &crate::Expr) -> String {
 		.trim_matches('⟨')
 		.trim_matches('⟩')
 		.to_string()
+}
+
+/// Check if a table's NS/DB matches the requested scope.
+/// Tables with no NS/DB (None) match any scope (they're in the default context).
+fn scope_matches(
+	table_ns: &Option<String>,
+	table_db: &Option<String>,
+	filter_ns: Option<&str>,
+	filter_db: Option<&str>,
+) -> bool {
+	let ns_ok = match (table_ns, filter_ns) {
+		(None, _) => true,
+		(Some(t), Some(f)) => t.eq_ignore_ascii_case(f),
+		(Some(_), None) => true,
+	};
+	let db_ok = match (table_db, filter_db) {
+		(None, _) => true,
+		(Some(t), Some(f)) => t.eq_ignore_ascii_case(f),
+		(Some(_), None) => true,
+	};
+	ns_ok && db_ok
 }
 
 fn extract_comment(expr: &crate::Expr) -> Option<String> {

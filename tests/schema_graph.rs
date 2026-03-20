@@ -347,6 +347,39 @@ fn should_track_ns_db_from_use_statement() {
 }
 
 #[test]
+fn should_scope_tables_by_ns_db() {
+	let mut sg =
+		SchemaGraph::from_source("USE NS prod DB main; DEFINE TABLE user SCHEMAFULL;").unwrap();
+	let sg2 =
+		SchemaGraph::from_source("USE NS test DB fixtures; DEFINE TABLE mock_user SCHEMAFULL;")
+			.unwrap();
+	sg.merge(sg2);
+
+	let prod = sg.scoped(Some("prod"), Some("main"));
+	assert!(prod.table("user").is_some());
+	assert!(prod.table("mock_user").is_none());
+
+	let test = sg.scoped(Some("test"), Some("fixtures"));
+	assert!(test.table("mock_user").is_some());
+	assert!(test.table("user").is_none());
+}
+
+#[test]
+fn should_include_unscoped_tables_in_any_scope() {
+	let mut sg = SchemaGraph::from_source("DEFINE TABLE global SCHEMAFULL;").unwrap();
+	let sg2 =
+		SchemaGraph::from_source("USE NS prod DB main; DEFINE TABLE scoped SCHEMAFULL;").unwrap();
+	sg.merge(sg2);
+
+	let prod = sg.scoped(Some("prod"), Some("main"));
+	assert!(
+		prod.table("global").is_some(),
+		"unscoped tables visible everywhere"
+	);
+	assert!(prod.table("scoped").is_some());
+}
+
+#[test]
 fn should_default_ns_db_to_none() {
 	let sg = SchemaGraph::from_source("DEFINE TABLE user SCHEMAFULL;").unwrap();
 	let table = sg.table("user").unwrap();
