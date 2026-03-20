@@ -1,0 +1,14 @@
+[meta]
+ns = "test_app"
+db = "main"
+system_db = "_system"
+surrealdb = ">=3.0.0"
+
+[[modules]]
+name = "_shared"
+path = "schema/_shared"
+
+[[modules]]
+name = "entity"
+path = "schema/entity"
+depends_on = ["_shared"]
