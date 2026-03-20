@@ -50,6 +50,11 @@ with rationale, any error messages encountered, and the current task status.
 - Zero fmt diffs
 - Never push directly to main — always create a PR
 
+## Supported SurrealDB Version
+- **SurrealDB 3.x+ only** — first-class support, all features tested against 3.x
+- SurrealDB 2.x is **out of scope** — not tested, not planned, no compatibility shims
+- When referencing docs or behavior, always use SurrealDB 3.x documentation
+
 ## Architecture
 - `src/builtins_generated.rs` — auto-generated, regenerate with `cargo make sync-builtins`
 - `src/upstream/` — auto-generated from SurrealDB, regenerate with `cargo make sync-main`

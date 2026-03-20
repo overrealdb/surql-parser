@@ -20,3 +20,7 @@ name = "SurrealQL Playground"
 [slash_commands.surql-schema]
 description = "Show SurrealQL schema from workspace .surql files"
 requires_argument = false
+
+[slash_commands.surql-relations]
+description = "Show table relationships graph (record links)"
+requires_argument = false

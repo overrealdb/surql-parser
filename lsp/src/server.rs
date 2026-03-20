@@ -67,23 +67,26 @@ impl Backend {
 		};
 		if let Some(root) = root {
 			match SchemaGraph::from_files(&root) {
-				Ok(sg) => match self.schema.write() {
-					Ok(mut schema) => {
-						tracing::info!(
-							"Schema rebuilt: {} tables, {} functions from {}",
-							sg.table_names().count(),
-							sg.function_names().count(),
-							root.display()
-						);
-						*schema = sg;
+				Ok(sg) => {
+					write_file_manifest(&root, &sg);
+					match self.schema.write() {
+						Ok(mut schema) => {
+							tracing::info!(
+								"Schema rebuilt: {} tables, {} functions from {}",
+								sg.table_names().count(),
+								sg.function_names().count(),
+								root.display()
+							);
+							*schema = sg;
+						}
+						Err(e) => tracing::error!("schema lock poisoned: {e}"),
 					}
-					Err(e) => tracing::error!("schema lock poisoned: {e}"),
-				},
+				}
 				Err(e) => {
 					tracing::warn!("Failed to rebuild schema: {e}");
+					write_file_manifest(&root, &SchemaGraph::default());
 				}
 			}
-			write_file_manifest(&root);
 		} else {
 			tracing::debug!("rebuild_schema: no workspace root set");
 		}
@@ -248,7 +251,7 @@ impl LanguageServer for Backend {
 			&& let Ok(path) = root.to_file_path()
 			&& let Ok(mut wr) = self.workspace_root.write()
 		{
-			write_file_manifest(&path);
+			write_file_manifest(&path, &SchemaGraph::default());
 			*wr = Some(path);
 		}
 
@@ -821,12 +824,12 @@ impl LanguageServer for Backend {
 /// Writes to two locations:
 /// 1. `surql-lsp-out/files.json` in project root (for general use)
 /// 2. Zed extension work dir (WASM can read via `std::fs` from `.`)
-fn write_file_manifest(root: &std::path::Path) {
+fn write_file_manifest(root: &std::path::Path, schema: &SchemaGraph) {
 	let mut files = Vec::new();
 	collect_manifest_files(root, root, &mut files);
 	files.sort();
 
-	// Build schema cache content
+	// Build schema cache from files
 	let mut schema_text = String::new();
 	let mut file_count = 0;
 	for rel_path in &files {
@@ -862,6 +865,9 @@ fn write_file_manifest(root: &std::path::Path) {
 		schema_text = format!("*{file_count} schema file(s)*\n\n{schema_text}");
 	}
 
+	// Build relations graph from SchemaGraph
+	let relations_text = build_relations_graph(schema);
+
 	// Write to project root
 	let manifest_dir = root.join("surql-lsp-out");
 	if std::fs::create_dir_all(&manifest_dir).is_ok() {
@@ -870,6 +876,7 @@ fn write_file_manifest(root: &std::path::Path) {
 			serde_json::to_string_pretty(&files).unwrap_or_else(|_| "[]".to_string()),
 		);
 		let _ = std::fs::write(manifest_dir.join("schema.md"), &schema_text);
+		let _ = std::fs::write(manifest_dir.join("relations.md"), &relations_text);
 	}
 
 	// Write to Zed extension work dir (WASM reads from ".")
@@ -878,9 +885,100 @@ fn write_file_manifest(root: &std::path::Path) {
 			.join("Library/Application Support/Zed/extensions/work/surrealql");
 		if zed_ext_dir.exists() {
 			let _ = std::fs::write(zed_ext_dir.join("schema.md"), &schema_text);
-			tracing::info!("Schema cache written to Zed extension dir");
+			let _ = std::fs::write(zed_ext_dir.join("relations.md"), &relations_text);
+			tracing::info!("Schema + relations cache written to Zed extension dir");
 		}
 	}
+}
+
+fn build_relations_graph(schema: &SchemaGraph) -> String {
+	let mut table_names: Vec<&str> = schema.table_names().collect();
+	table_names.sort();
+
+	if table_names.is_empty() {
+		return "No tables defined".to_string();
+	}
+
+	let mut text = String::new();
+	let mut edges: Vec<(String, String, String)> = Vec::new();
+
+	// Collect all edges (table → linked_table via field)
+	for table_name in &table_names {
+		if let Some(table) = schema.table(table_name) {
+			for field in &table.fields {
+				for link in &field.record_links {
+					edges.push((table_name.to_string(), link.clone(), field.name.clone()));
+				}
+			}
+		}
+	}
+
+	// Table summary
+	text.push_str(&format!("**{} tables**\n\n", table_names.len()));
+
+	// ASCII graph
+	text.push_str("```\n");
+	for table_name in &table_names {
+		let table = match schema.table(table_name) {
+			Some(t) => t,
+			None => continue,
+		};
+
+		let schema_type = if table.full {
+			"SCHEMAFULL"
+		} else {
+			"SCHEMALESS"
+		};
+		let field_count = table.fields.len();
+		let index_count = table.indexes.len();
+		let event_count = table.events.len();
+
+		let mut meta = vec![schema_type.to_string()];
+		if field_count > 0 {
+			meta.push(format!("{field_count}f"));
+		}
+		if index_count > 0 {
+			meta.push(format!("{index_count}i"));
+		}
+		if event_count > 0 {
+			meta.push(format!("{event_count}e"));
+		}
+
+		text.push_str(&format!("[{table_name}] ({})\n", meta.join(", ")));
+
+		// Outgoing links
+		let outgoing: Vec<_> = edges
+			.iter()
+			.filter(|(from, _, _)| from == *table_name)
+			.collect();
+		for (_, to, field) in &outgoing {
+			text.push_str(&format!(
+				"  \u{2514}\u{2500}\u{2500} .{field} \u{2192} [{to}]\n"
+			));
+		}
+
+		// Incoming links
+		let incoming: Vec<_> = edges
+			.iter()
+			.filter(|(_, to, _)| to == *table_name)
+			.collect();
+		for (from, _, field) in &incoming {
+			text.push_str(&format!(
+				"  \u{2514}\u{2500}\u{2500} [{from}].{field} \u{2192} *\n"
+			));
+		}
+	}
+	text.push_str("```\n");
+
+	// Edge list
+	if !edges.is_empty() {
+		text.push_str(&format!("\n**{} relation(s)**\n\n", edges.len()));
+		for (from, to, field) in &edges {
+			text.push_str(&format!("- `{from}.{field}` \u{2192} `{to}`\n"));
+		}
+	}
+
+	text
 }
 
 fn collect_manifest_files(base: &std::path::Path, dir: &std::path::Path, out: &mut Vec<String>) {
@@ -1304,43 +1402,42 @@ fn type_documentation(word: &str, schema: &surql_parser::SchemaGraph) -> Option<
 	let lower = word.to_lowercase();
 	let doc = match lower.as_str() {
 		"string" => {
-			"**string** — UTF-8 text\n\n```surql\nDEFINE FIELD name ON user TYPE string\n```\n\n[Docs](https://surrealdb.com/docs/surrealql/datamodel/simple#string)"
+			"**string** — UTF-8 text\n\n```surql\nDEFINE FIELD name ON user TYPE string\n```\n\n[Docs](https://surrealdb.com/docs/surrealql/datamodel/strings)"
 		}
 		"int" => {
-			"**int** — 64-bit signed integer\n\n```surql\nDEFINE FIELD age ON user TYPE int\n```\n\n[Docs](https://surrealdb.com/docs/surrealql/datamodel/simple#int)"
+			"**int** — 64-bit signed integer\n\n```surql\nDEFINE FIELD age ON user TYPE int\n```\n\n[Docs](https://surrealdb.com/docs/surrealql/datamodel/numbers)"
 		}
 		"float" => {
-			"**float** — 64-bit floating point\n\n```surql\nDEFINE FIELD score ON user TYPE float\n```\n\n[Docs](https://surrealdb.com/docs/surrealql/datamodel/simple#float)"
+			"**float** — 64-bit floating point\n\n```surql\nDEFINE FIELD score ON user TYPE float\n```\n\n[Docs](https://surrealdb.com/docs/surrealql/datamodel/numbers)"
 		}
 		"decimal" => {
-			"**decimal** — Arbitrary precision decimal\n\n```surql\nDEFINE FIELD price ON product TYPE decimal\n```\n\n[Docs](https://surrealdb.com/docs/surrealql/datamodel/simple#decimal)"
+			"**decimal** — Arbitrary precision decimal\n\n```surql\nDEFINE FIELD price ON product TYPE decimal\n```\n\n[Docs](https://surrealdb.com/docs/surrealql/datamodel/numbers)"
 		}
 		"number" => {
-			"**number** — Any numeric type (int, float, or decimal)\n\n```surql\nDEFINE FIELD value ON data TYPE number\n```\n\n[Docs](https://surrealdb.com/docs/surrealql/datamodel/simple#number)"
+			"**number** — Any numeric type (int, float, or decimal)\n\n```surql\nDEFINE FIELD value ON data TYPE number\n```\n\n[Docs](https://surrealdb.com/docs/surrealql/datamodel/numbers)"
 		}
 		"bool" => {
-			"**bool** — Boolean (true/false)\n\n```surql\nDEFINE FIELD active ON user TYPE bool DEFAULT true\n```\n\n[Docs](https://surrealdb.com/docs/surrealql/datamodel/simple#bool)"
+			"**bool** — Boolean (true/false)\n\n```surql\nDEFINE FIELD active ON user TYPE bool DEFAULT true\n```\n\n[Docs](https://surrealdb.com/docs/surrealql/datamodel/booleans)"
 		}
 		"datetime" => {
-			"**datetime** — ISO 8601 timestamp\n\n```surql\nDEFINE FIELD created_at ON user TYPE datetime DEFAULT time::now()\n```\n\n[Docs](https://surrealdb.com/docs/surrealql/datamodel/simple#datetime)"
+			"**datetime** — ISO 8601 timestamp\n\n```surql\nDEFINE FIELD created_at ON user TYPE datetime DEFAULT time::now()\n```\n\n[Docs](https://surrealdb.com/docs/surrealql/datamodel/datetimes)"
 		}
 		"duration" => {
-			"**duration** — Time span (e.g., 1h, 30m, 7d)\n\n```surql\nDEFINE FIELD ttl ON cache TYPE duration\n```\n\n[Docs](https://surrealdb.com/docs/surrealql/datamodel/simple#duration)"
+			"**duration** — Time span (e.g., 1h, 30m, 7d)\n\n```surql\nDEFINE FIELD ttl ON cache TYPE duration\n```\n\n[Docs](https://surrealdb.com/docs/surrealql/datamodel/durations)"
 		}
 		"object" => {
-			"**object** — JSON-like object (key-value map)\n\n```surql\nDEFINE FIELD settings ON user TYPE object DEFAULT {}\n```\n\n[Docs](https://surrealdb.com/docs/surrealql/datamodel/simple#object)"
+			"**object** — JSON-like object (key-value map)\n\n```surql\nDEFINE FIELD settings ON user TYPE object DEFAULT {}\n```\n\n[Docs](https://surrealdb.com/docs/surrealql/datamodel/objects)"
 		}
 		"array" => {
-			"**array** — Ordered collection. Parameterized: `array<string>`\n\n```surql\nDEFINE FIELD tags ON post TYPE array<string> DEFAULT []\n```\n\n[Docs](https://surrealdb.com/docs/surrealql/datamodel/simple#array)"
+			"**array** — Ordered collection. Parameterized: `array<string>`\n\n```surql\nDEFINE FIELD tags ON post TYPE array<string> DEFAULT []\n```\n\n[Docs](https://surrealdb.com/docs/surrealql/datamodel/arrays)"
 		}
 		"set" => {
-			"**set** — Unique collection (no duplicates). Parameterized: `set<string>`\n\n```surql\nDEFINE FIELD roles ON user TYPE set<string>\n```\n\n[Docs](https://surrealdb.com/docs/surrealql/datamodel/simple#set)"
+			"**set** — Unique collection (no duplicates). Parameterized: `set<string>`\n\n```surql\nDEFINE FIELD roles ON user TYPE set<string>\n```\n\n[Docs](https://surrealdb.com/docs/surrealql/datamodel/sets)"
 		}
 		"option" => {
-			"**option** — Nullable type. `option<T>` means the field can be NONE\n\n```surql\nDEFINE FIELD bio ON user TYPE option<string>\n```\n\n[Docs](https://surrealdb.com/docs/surrealql/datamodel/simple#option)"
+			"**option** — Nullable type. `option<T>` means the field can be NONE\n\n```surql\nDEFINE FIELD bio ON user TYPE option<string>\n```\n\n[Docs](https://surrealdb.com/docs/surrealql/datamodel/values)"
 		}
 		"record" => {
-			// For record<user>, show the target table's fields
 			let tables: Vec<_> = schema.table_names().collect();
 			let table_list = if tables.is_empty() {
 				String::new()
@@ -1354,20 +1451,20 @@ fn type_documentation(word: &str, schema: &surql_parser::SchemaGraph) -> Option<
 				"**record** — Link to another record. Parameterized: `record<table>`\n\n\
 				 ```surql\nDEFINE FIELD author ON post TYPE record<user>\n```\n\n\
 				 The linked record can be fetched with `FETCH`.{table_list}\n\n\
-				 [Docs](https://surrealdb.com/docs/surrealql/datamodel/simple#record)"
+				 [Docs](https://surrealdb.com/docs/surrealql/datamodel/records)"
 			));
 		}
 		"uuid" => {
-			"**uuid** — Universally unique identifier\n\n```surql\nDEFINE FIELD id ON user TYPE uuid DEFAULT rand::uuid::v4()\n```\n\n[Docs](https://surrealdb.com/docs/surrealql/datamodel/simple#uuid)"
+			"**uuid** — Universally unique identifier\n\n```surql\nDEFINE FIELD id ON user TYPE uuid DEFAULT rand::uuid::v4()\n```\n\n[Docs](https://surrealdb.com/docs/surrealql/datamodel/uuid)"
 		}
 		"bytes" => {
-			"**bytes** — Binary data\n\n[Docs](https://surrealdb.com/docs/surrealql/datamodel/simple#bytes)"
+			"**bytes** — Binary data\n\n[Docs](https://surrealdb.com/docs/surrealql/datamodel/bytes)"
 		}
 		"geometry" => {
 			"**geometry** — GeoJSON geometry (point, line, polygon, etc.)\n\n[Docs](https://surrealdb.com/docs/surrealql/datamodel/geometries)"
 		}
 		"any" => {
-			"**any** — Accepts any type (no type constraint)\n\n```surql\nDEFINE FIELD data ON flexible_table TYPE any\n```"
+			"**any** — Accepts any type (no type constraint)\n\n```surql\nDEFINE FIELD data ON flexible_table TYPE any\n```\n\n[Docs](https://surrealdb.com/docs/surrealql/datamodel/values)"
 		}
 		_ => return None,
 	};
@@ -1613,7 +1710,7 @@ pub(crate) fn keyword_documentation(word: &str) -> Option<&'static str> {
 			 ```surql\nIF condition { ... }\n\
 			 ELSE IF condition { ... }\n\
 			 ELSE { ... }\n```\n\n\
-			 [Docs](https://surrealdb.com/docs/surrealql/statements/if-else)",
+			 [Docs](https://surrealdb.com/docs/surrealql/statements/ifelse)",
 		),
 		"FOR" => Some(
 			"**FOR** — Iterate over values\n\n\
@@ -1633,12 +1730,12 @@ pub(crate) fn keyword_documentation(word: &str) -> Option<&'static str> {
 		"COMMIT" => Some(
 			"**COMMIT** — Commit a transaction\n\n\
 			 ```surql\nCOMMIT TRANSACTION\n```\n\n\
-			 [Docs](https://surrealdb.com/docs/surrealql/statements/begin)",
+			 [Docs](https://surrealdb.com/docs/surrealql/statements/commit)",
 		),
 		"CANCEL" => Some(
 			"**CANCEL** — Roll back a transaction\n\n\
 			 ```surql\nCANCEL TRANSACTION\n```\n\n\
-			 [Docs](https://surrealdb.com/docs/surrealql/statements/begin)",
+			 [Docs](https://surrealdb.com/docs/surrealql/statements/cancel)",
 		),
 		"LIVE" => Some(
 			"**LIVE** — Subscribe to real-time changes\n\n\
