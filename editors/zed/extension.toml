@@ -18,7 +18,7 @@ languages = ["SurrealQL", "Rust"]
 name = "SurrealQL Playground"
 
 [slash_commands.surql-schema]
-description = "Show SurrealQL schema from workspace .surql files"
+description = "Show SurrealQL schema (optionally filter by table name)"
 requires_argument = false
 
 [slash_commands.surql-relations]
