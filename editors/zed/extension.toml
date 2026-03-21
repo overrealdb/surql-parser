@@ -24,3 +24,7 @@ requires_argument = false
 [slash_commands.surql-relations]
 description = "Show table relationships graph (record links)"
 requires_argument = false
+
+[slash_commands.surql-info]
+description = "Workspace summary: tables, fields, indexes, functions, files"
+requires_argument = false

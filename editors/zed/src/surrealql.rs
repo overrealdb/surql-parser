@@ -47,6 +47,7 @@ impl zed::Extension for SurrealQlExtension {
 		let (filename, label) = match command.name.as_str() {
 			"surql-schema" => ("schema.md", "SurrealQL Schema"),
 			"surql-relations" => ("relations.md", "SurrealQL Relations"),
+			"surql-info" => ("info.md", "SurrealQL Info"),
 			_ => return Err(format!("Unknown command: {}", command.name)),
 		};
 		let text = std::fs::read_to_string(filename).unwrap_or_else(|_| {

@@ -932,8 +932,9 @@ fn write_file_manifest(root: &std::path::Path, schema: &SchemaGraph) {
 		schema_text = format!("*{file_count} schema file(s)*\n\n{schema_text}");
 	}
 
-	// Build relations graph from SchemaGraph
+	// Build relations graph and info summary from SchemaGraph
 	let relations_text = build_relations_graph(schema);
+	let info_text = build_info_summary(schema, &files, root);
 
 	// Write to project root
 	let manifest_dir = root.join("surql-lsp-out");
@@ -944,6 +945,7 @@ fn write_file_manifest(root: &std::path::Path, schema: &SchemaGraph) {
 		);
 		let _ = std::fs::write(manifest_dir.join("schema.md"), &schema_text);
 		let _ = std::fs::write(manifest_dir.join("relations.md"), &relations_text);
+		let _ = std::fs::write(manifest_dir.join("info.md"), &info_text);
 	}
 
 	// Write to Zed extension work dir (WASM reads from ".")
@@ -953,9 +955,62 @@ fn write_file_manifest(root: &std::path::Path, schema: &SchemaGraph) {
 		if zed_ext_dir.exists() {
 			let _ = std::fs::write(zed_ext_dir.join("schema.md"), &schema_text);
 			let _ = std::fs::write(zed_ext_dir.join("relations.md"), &relations_text);
-			tracing::info!("Schema + relations cache written to Zed extension dir");
+			let _ = std::fs::write(zed_ext_dir.join("info.md"), &info_text);
+			tracing::info!("Schema + relations + info cache written to Zed extension dir");
 		}
 	}
+}
+
+fn build_info_summary(schema: &SchemaGraph, files: &[String], root: &std::path::Path) -> String {
+	let table_count = schema.table_names().count();
+	let fn_count = schema.function_names().count();
+	let param_count = schema.param_names().count();
+
+	let mut total_fields = 0;
+	let mut total_indexes = 0;
+	let mut total_events = 0;
+	let mut total_relations = 0;
+	let mut schemafull_count = 0;
+
+	for table_name in schema.table_names() {
+		if let Some(table) = schema.table(table_name) {
+			total_fields += table.fields.len();
+			total_indexes += table.indexes.len();
+			total_events += table.events.len();
+			if table.full {
+				schemafull_count += 1;
+			}
+			for field in &table.fields {
+				total_relations += field.record_links.len();
+			}
+		}
+	}
+
+	let manifest_info = detect_overshift_manifest(root)
+		.map(|(ns, db)| format!("- **Namespace:** `{ns}`\n- **Database:** `{db}`\n"))
+		.unwrap_or_default();
+
+	format!(
+		"# SurrealQL Workspace Info\n\n\
+		 ## Overview\n\n\
+		 - **{table_count}** tables ({schemafull_count} SCHEMAFULL, {} SCHEMALESS)\n\
+		 - **{total_fields}** fields\n\
+		 - **{total_indexes}** indexes\n\
+		 - **{total_events}** events\n\
+		 - **{total_relations}** record links\n\
+		 - **{fn_count}** functions\n\
+		 - **{param_count}** params\n\
+		 - **{}** .surql files\n\n\
+		 {manifest_info}\
+		 ## Available Commands\n\n\
+		 | Command | Description |\n\
+		 |---------|-------------|\n\
+		 | `/surql-schema` | Show all DEFINE statements |\n\
+		 | `/surql-relations` | Table relationship graph |\n\
+		 | `/surql-info` | This summary |\n",
+		table_count - schemafull_count,
+		files.len()
+	)
 }
 
 fn build_relations_graph(schema: &SchemaGraph) -> String {
