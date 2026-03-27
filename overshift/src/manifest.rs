@@ -129,6 +129,28 @@ impl ManifestBuilder {
 			name: name.into(),
 			content: content.into(),
 			checksum,
+			down_content: None,
+		});
+		self
+	}
+
+	/// Add a migration with both up and down SQL content.
+	///
+	/// The `down_content` is executed during rollback to reverse the migration.
+	pub fn migration_with_down(
+		mut self,
+		version: u32,
+		name: &str,
+		content: &str,
+		down_content: &str,
+	) -> Self {
+		let checksum = compute_checksum(content);
+		self.migrations.push(Migration {
+			version,
+			name: name.into(),
+			content: content.into(),
+			checksum,
+			down_content: Some(down_content.into()),
 		});
 		self
 	}
@@ -443,13 +465,18 @@ mod tests {
 	}
 
 	#[test]
-	fn builder_validates_migration_sequence() {
+	fn builder_warns_on_gap_but_succeeds() {
 		let result = Manifest::builder()
 			.meta("ns", "db", "_sys")
 			.migration(1, "a", "SELECT 1;")
-			.migration(3, "c", "SELECT 3;") // gap!
+			.migration(3, "c", "SELECT 3;") // gap — warns but succeeds
 			.build();
-		assert!(result.is_err());
+		assert!(result.is_ok());
+		let manifest = result.unwrap();
+		let migrations = manifest.preloaded_migrations.as_ref().unwrap();
+		assert_eq!(migrations.len(), 2);
+		assert_eq!(migrations[0].version, 1);
+		assert_eq!(migrations[1].version, 3);
 	}
 
 	#[test]

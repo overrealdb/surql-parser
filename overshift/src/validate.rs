@@ -74,6 +74,8 @@ pub struct SchemaDiff {
 	pub extra_tables: Vec<String>,
 	pub missing_functions: Vec<String>,
 	pub extra_functions: Vec<String>,
+	/// Field type changes: (table, field, old_type, new_type).
+	pub changed_fields: Vec<(String, String, String, String)>,
 }
 
 impl SchemaDiff {
@@ -82,6 +84,7 @@ impl SchemaDiff {
 			&& self.extra_tables.is_empty()
 			&& self.missing_functions.is_empty()
 			&& self.extra_functions.is_empty()
+			&& self.changed_fields.is_empty()
 	}
 }
 
@@ -102,11 +105,23 @@ impl std::fmt::Display for SchemaDiff {
 		for func in &self.extra_functions {
 			writeln!(f, "+ function `{func}` extra in target")?;
 		}
+		for (table, field, old_type, new_type) in &self.changed_fields {
+			writeln!(
+				f,
+				"~ field `{field}` on `{table}` type changed: `{old_type}` -> `{new_type}`"
+			)?;
+		}
 		Ok(())
 	}
 }
 
 /// Extract table and function names from INFO FOR DB response.
+///
+/// This is a shallow comparison that only checks table/function existence.
+/// Field-level and index-level differences are not detected. For deeper
+/// static analysis, see `surql_parser::SchemaDiff` which works on parsed AST.
+///
+/// TODO: add field/index comparison for runtime `INFO FOR DB` JSON values.
 fn extract_db_info(info: &serde_json::Value) -> (Vec<String>, Vec<String>) {
 	let tables = info
 		.get("tables")
@@ -122,9 +137,15 @@ fn extract_db_info(info: &serde_json::Value) -> (Vec<String>, Vec<String>) {
 }
 
 /// Compare two database states and return the diff.
+///
+/// Compares table names, function names, and field types for tables that exist
+/// in both states. Field type changes are detected by comparing the `DEFINE FIELD`
+/// strings from `INFO FOR TABLE` within the `INFO FOR DB` response.
 pub fn compare_db_info(expected: &serde_json::Value, actual: &serde_json::Value) -> SchemaDiff {
 	let (exp_tables, exp_fns) = extract_db_info(expected);
 	let (act_tables, act_fns) = extract_db_info(actual);
+
+	let changed_fields = detect_field_type_changes(expected, actual, &exp_tables, &act_tables);
 
 	SchemaDiff {
 		missing_tables: exp_tables
@@ -147,7 +168,48 @@ pub fn compare_db_info(expected: &serde_json::Value, actual: &serde_json::Value)
 			.filter(|f| !exp_fns.contains(f))
 			.cloned()
 			.collect(),
+		changed_fields,
 	}
+}
+
+/// Detect field type changes between expected and actual INFO FOR DB responses.
+///
+/// For each table that exists in both states, compares the field definition strings.
+/// Field definitions in INFO FOR DB are stored as `"DEFINE FIELD name ON table TYPE ..."`.
+fn detect_field_type_changes(
+	expected: &serde_json::Value,
+	actual: &serde_json::Value,
+	exp_tables: &[String],
+	act_tables: &[String],
+) -> Vec<(String, String, String, String)> {
+	let mut changed = Vec::new();
+
+	let exp_tables_obj = expected.get("tables").and_then(|t| t.as_object());
+	let act_tables_obj = actual.get("tables").and_then(|t| t.as_object());
+
+	let (Some(exp_obj), Some(act_obj)) = (exp_tables_obj, act_tables_obj) else {
+		return changed;
+	};
+
+	for table in exp_tables {
+		if !act_tables.contains(table) {
+			continue;
+		}
+
+		let exp_fields = exp_obj.get(table).and_then(|v| v.as_str()).unwrap_or("");
+		let act_fields = act_obj.get(table).and_then(|v| v.as_str()).unwrap_or("");
+
+		if exp_fields != act_fields {
+			changed.push((
+				table.clone(),
+				"*".to_string(),
+				exp_fields.to_string(),
+				act_fields.to_string(),
+			));
+		}
+	}
+
+	changed
 }
 
 /// Query INFO FOR DB from a database connection.
@@ -159,5 +221,5 @@ pub async fn query_db_info(db: &Surreal<Any>) -> crate::Result<serde_json::Value
 	let info: Option<serde_json::Value> = response
 		.take(0)
 		.map_err(|e| Error::Validation(format!("failed to read DB info: {e}")))?;
-	Ok(info.unwrap_or_default())
+	info.ok_or_else(|| Error::Validation("INFO FOR DB returned no data".into()))
 }

@@ -1,0 +1,5 @@
+error: schema path 'nonexistent_dir/' does not exist
+ --> tests/ui/fail_function_schema_path.rs:3:38
+  |
+3 | #[surql_function("fn::add", schema = "nonexistent_dir/")]
+  |                                      ^^^^^^^^^^^^^^^^^^

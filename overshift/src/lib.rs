@@ -33,6 +33,8 @@ pub mod manifest;
 pub mod migration;
 pub mod plan;
 pub mod schema;
+#[cfg(feature = "shadow")]
+pub mod shadow;
 pub mod snapshot;
 pub mod validate;
 
@@ -42,5 +44,5 @@ pub use lock::MigrationLock;
 pub use lock::SurrealLock;
 pub use manifest::{Manifest, ManifestBuilder};
 pub use migration::{AppliedMigration, Migration, compute_checksum};
-pub use plan::{ApplyResult, Plan, plan};
+pub use plan::{ApplyResult, Plan, RollbackResult, plan, rollback};
 pub use schema::SchemaModule;

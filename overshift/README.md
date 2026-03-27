@@ -1,7 +1,3 @@
-<p align="center">
-  <img src="assets/logo.svg" alt="overshift" width="120" />
-</p>
-
 <h1 align="center">overshift</h1>
 
 <p align="center">
@@ -9,10 +5,8 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/overrealdb/overshift/actions/workflows/ci.yml"><img src="https://github.com/overrealdb/overshift/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
-  <a href="https://codecov.io/gh/overrealdb/overshift"><img src="https://codecov.io/gh/overrealdb/overshift/graph/badge.svg" alt="codecov" /></a>
-  <a href="https://crates.io/crates/overshift"><img src="https://img.shields.io/crates/v/overshift.svg" alt="crates.io" /></a>
-  <a href="https://docs.rs/overshift"><img src="https://docs.rs/overshift/badge.svg" alt="docs.rs" /></a>
+  <a href="https://github.com/overrealdb/surql-parser/actions/workflows/ci.yml"><img src="https://github.com/overrealdb/surql-parser/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
+  <a href="https://codecov.io/gh/overrealdb/surql-parser"><img src="https://codecov.io/gh/overrealdb/surql-parser/graph/badge.svg" alt="codecov" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue.svg" alt="License" /></a>
 </p>
 

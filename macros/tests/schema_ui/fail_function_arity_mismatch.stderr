@@ -1,0 +1,5 @@
+error: parameter count mismatch for fn::add: Rust function has 1 parameter(s), but DEFINE FUNCTION has 2 ($a: int, $b: int)
+ --> tests/schema_ui/fail_function_arity_mismatch.rs:3:18
+  |
+3 | #[surql_function("fn::add", schema = "surql_fixtures/")]
+  |                  ^^^^^^^^^

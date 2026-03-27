@@ -1,3 +1,4 @@
+use overshift::Manifest;
 use overshift::migration::{compute_checksum, discover_migrations};
 
 fn fixture_path() -> std::path::PathBuf {
@@ -122,7 +123,7 @@ fn discover_rejects_bad_filename() {
 }
 
 #[test]
-fn discover_rejects_gap_in_versions() {
+fn discover_warns_on_gap_but_succeeds() {
 	let tmp = tempfile::tempdir().unwrap();
 	let mig_dir = tmp.path().join("migrations");
 	std::fs::create_dir(&mig_dir).unwrap();
@@ -131,7 +132,11 @@ fn discover_rejects_gap_in_versions() {
 	std::fs::write(mig_dir.join("v003_c.surql"), "SELECT 3;").unwrap();
 
 	let result = discover_migrations(tmp.path());
-	assert!(result.is_err());
+	assert!(result.is_ok());
+	let migrations = result.unwrap();
+	assert_eq!(migrations.len(), 2);
+	assert_eq!(migrations[0].version, 1);
+	assert_eq!(migrations[1].version, 3);
 }
 
 #[test]
@@ -193,4 +198,164 @@ fn discover_handles_large_version_number() {
 	let migrations = discover_migrations(tmp.path()).unwrap();
 	assert_eq!(migrations.len(), 100);
 	assert_eq!(migrations[99].version, 100);
+}
+
+// ─── Down migration discovery ───
+
+#[test]
+fn discover_loads_down_content_when_present() {
+	let tmp = tempfile::tempdir().unwrap();
+	let mig_dir = tmp.path().join("migrations");
+	std::fs::create_dir(&mig_dir).unwrap();
+
+	std::fs::write(
+		mig_dir.join("v001_create_user.surql"),
+		"DEFINE TABLE user SCHEMAFULL;",
+	)
+	.unwrap();
+	std::fs::write(
+		mig_dir.join("v001_create_user.down.surql"),
+		"REMOVE TABLE user;",
+	)
+	.unwrap();
+
+	let migrations = discover_migrations(tmp.path()).unwrap();
+	assert_eq!(migrations.len(), 1);
+	assert_eq!(
+		migrations[0].down_content.as_deref(),
+		Some("REMOVE TABLE user;")
+	);
+}
+
+#[test]
+fn discover_sets_down_content_none_when_absent() {
+	let tmp = tempfile::tempdir().unwrap();
+	let mig_dir = tmp.path().join("migrations");
+	std::fs::create_dir(&mig_dir).unwrap();
+
+	std::fs::write(mig_dir.join("v001_init.surql"), "SELECT 1;").unwrap();
+
+	let migrations = discover_migrations(tmp.path()).unwrap();
+	assert_eq!(migrations.len(), 1);
+	assert!(migrations[0].down_content.is_none());
+}
+
+#[test]
+fn discover_does_not_count_down_file_as_separate_migration() {
+	let tmp = tempfile::tempdir().unwrap();
+	let mig_dir = tmp.path().join("migrations");
+	std::fs::create_dir(&mig_dir).unwrap();
+
+	std::fs::write(mig_dir.join("v001_init.surql"), "SELECT 1;").unwrap();
+	std::fs::write(mig_dir.join("v001_init.down.surql"), "SELECT 0;").unwrap();
+	std::fs::write(mig_dir.join("v002_more.surql"), "SELECT 2;").unwrap();
+	std::fs::write(mig_dir.join("v002_more.down.surql"), "SELECT 0;").unwrap();
+
+	let migrations = discover_migrations(tmp.path()).unwrap();
+	assert_eq!(
+		migrations.len(),
+		2,
+		"down.surql files should not be counted as migrations"
+	);
+	assert_eq!(migrations[0].version, 1);
+	assert_eq!(migrations[1].version, 2);
+}
+
+// ─── Conflict detection ───
+
+#[test]
+fn should_detect_duplicate_versions() {
+	let tmp = tempfile::tempdir().unwrap();
+	let mig_dir = tmp.path().join("migrations");
+	std::fs::create_dir(&mig_dir).unwrap();
+
+	std::fs::write(mig_dir.join("v003_alice.surql"), "SELECT 'alice';").unwrap();
+	std::fs::write(mig_dir.join("v003_bob.surql"), "SELECT 'bob';").unwrap();
+	std::fs::write(mig_dir.join("v001_init.surql"), "SELECT 1;").unwrap();
+	std::fs::write(mig_dir.join("v002_seed.surql"), "SELECT 2;").unwrap();
+
+	let result = discover_migrations(tmp.path());
+	assert!(result.is_err());
+
+	let err_msg = result.unwrap_err().to_string();
+	assert!(
+		err_msg.contains("v003_alice.surql"),
+		"error should mention v003_alice.surql, got: {err_msg}"
+	);
+	assert!(
+		err_msg.contains("v003_bob.surql"),
+		"error should mention v003_bob.surql, got: {err_msg}"
+	);
+	assert!(
+		err_msg.contains("duplicate"),
+		"error should mention 'duplicate', got: {err_msg}"
+	);
+}
+
+#[test]
+fn should_warn_on_version_gap() {
+	let tmp = tempfile::tempdir().unwrap();
+	let mig_dir = tmp.path().join("migrations");
+	std::fs::create_dir(&mig_dir).unwrap();
+
+	std::fs::write(mig_dir.join("v001_init.surql"), "SELECT 1;").unwrap();
+	std::fs::write(mig_dir.join("v003_skip.surql"), "SELECT 3;").unwrap();
+
+	let result = discover_migrations(tmp.path());
+	assert!(
+		result.is_ok(),
+		"gaps should warn but not fail: {:?}",
+		result.err()
+	);
+
+	let migrations = result.unwrap();
+	assert_eq!(migrations.len(), 2);
+	assert_eq!(migrations[0].version, 1);
+	assert_eq!(migrations[1].version, 3);
+}
+
+#[tokio::test]
+async fn should_reject_duplicate_in_plan() {
+	let db = surrealdb::engine::any::connect("mem://").await.unwrap();
+	db.use_ns("test_dup_plan").use_db("main").await.unwrap();
+
+	let tmp = tempfile::tempdir().unwrap();
+	let mig_dir = tmp.path().join("migrations");
+	std::fs::create_dir(&mig_dir).unwrap();
+
+	std::fs::write(mig_dir.join("v001_init.surql"), "-- init").unwrap();
+	std::fs::write(mig_dir.join("v002_seed.surql"), "-- seed").unwrap();
+	std::fs::write(mig_dir.join("v003_data.surql"), "-- original data").unwrap();
+	std::fs::write(
+		tmp.path().join("manifest.toml"),
+		r#"
+		[meta]
+		ns = "test_dup_plan"
+		db = "main"
+		system_db = "_system"
+	"#,
+	)
+	.unwrap();
+
+	let manifest = Manifest::load(tmp.path()).unwrap();
+
+	// Apply all three migrations
+	let plan = overshift::plan(&db, &manifest).await.unwrap();
+	assert_eq!(plan.pending_migrations.len(), 3);
+	plan.apply(&db).await.unwrap();
+
+	// Tamper with v003 content on disk after it was applied
+	std::fs::write(mig_dir.join("v003_data.surql"), "-- MODIFIED data").unwrap();
+
+	// Plan should detect that applied v003 checksum doesn't match filesystem v003
+	let result = overshift::plan(&db, &manifest).await;
+	assert!(
+		result.is_err(),
+		"plan should reject when applied migration checksum differs from filesystem"
+	);
+	let err = result.unwrap_err().to_string();
+	assert!(
+		err.contains("checksum mismatch"),
+		"expected checksum mismatch, got: {err}"
+	);
 }

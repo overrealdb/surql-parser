@@ -1,0 +1,7 @@
+error: type mismatch for parameter `$min`: Rust type `bool` is not compatible with SurrealQL type `int`
+         inferred from: `age > $min` (field `age` is `int`)
+         expected Rust types: i64, i32, i16, i8, u64, u32, u16, u8, isize, usize
+ --> tests/schema_ui/fail_query_type_mismatch.rs:7:3
+  |
+7 |         min: bool,
+  |         ^^^

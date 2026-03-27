@@ -1,4 +1,4 @@
-error: Invalid SurrealQL: Invalid query: Unexpected token `an identifier`, expected Eof
+error: Invalid SurrealQL: Parse error: Invalid query: Unexpected token `an identifier`, expected Eof
  --> [1:7]
   |
 1 | SELCT name FROM user

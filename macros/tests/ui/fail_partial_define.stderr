@@ -1,4 +1,4 @@
-error: Invalid SurrealQL: Invalid query: Unexpected end of file, expected an expression
+error: Invalid SurrealQL: Parse error: Invalid query: Unexpected end of file, expected an expression
  --> [1:12]
   |
 1 | DEFINE TABLE

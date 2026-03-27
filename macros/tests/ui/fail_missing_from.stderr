@@ -1,4 +1,4 @@
-error: Invalid SurrealQL: Invalid query: Unexpected token `WHERE`, expected FROM
+error: Invalid SurrealQL: Parse error: Invalid query: Unexpected token `WHERE`, expected FROM
  --> [1:10]
   |
 1 | SELECT * WHERE age > 18

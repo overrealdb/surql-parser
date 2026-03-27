@@ -45,6 +45,21 @@ const READ_APPLIED_SQL: &str = surql_check!(
 "#
 );
 
+/// Query: delete a migration from `migration_lock` by version.
+const DELETE_MIGRATION_SQL: &str = surql_check!(
+	r#"
+	DELETE FROM migration_lock WHERE version = $version
+"#
+);
+
+/// The result of rolling back migrations.
+#[derive(Debug)]
+pub struct RollbackResult {
+	pub rolled_back: Vec<String>,
+	pub target_version: u32,
+	pub errors: Vec<String>,
+}
+
 /// The result of `plan()` — everything needed to apply changes.
 #[derive(Debug)]
 pub struct Plan {
@@ -52,6 +67,8 @@ pub struct Plan {
 	pub pending_migrations: Vec<Migration>,
 	pub schema_modules: Vec<SchemaModule>,
 	pub functions_to_validate: Vec<String>,
+	#[cfg(feature = "shadow")]
+	pub(crate) manifest: Manifest,
 }
 
 /// The result of `Plan::apply()`.
@@ -60,6 +77,8 @@ pub struct ApplyResult {
 	pub applied_migrations: usize,
 	pub applied_modules: usize,
 	pub instance_id: String,
+	#[cfg(feature = "shadow")]
+	pub schema_drift: Option<String>,
 }
 
 impl Plan {
@@ -118,6 +137,8 @@ impl Plan {
 				applied_migrations: 0,
 				applied_modules: 0,
 				instance_id,
+				#[cfg(feature = "shadow")]
+				schema_drift: None,
 			});
 		}
 
@@ -139,11 +160,21 @@ impl Plan {
 			.map_err(|e| Error::Migration(format!("bootstrap failed: {e}")))?;
 
 		// Acquire distributed lock
-		let lock = SurrealLock::new(db.clone(), instance_id.clone(), "migration");
+		let lock = SurrealLock::new(db.clone(), instance_id.clone(), "migration")?;
 		lock.acquire().await?;
 
 		// Apply everything, always releasing the lock afterward
+		#[cfg(feature = "shadow")]
+		let manifest = self.manifest.clone();
 		let result = apply_inner(db, &self, &instance_id).await;
+
+		// Post-apply verification: compare real DB against shadow DB
+		#[cfg(feature = "shadow")]
+		let schema_drift = if result.is_ok() {
+			verify_against_shadow_after_apply(db, &self.meta, &manifest).await
+		} else {
+			None
+		};
 
 		if let Err(e) = lock.release().await {
 			error!("failed to release migration lock: {e}");
@@ -160,6 +191,8 @@ impl Plan {
 			applied_migrations,
 			applied_modules,
 			instance_id,
+			#[cfg(feature = "shadow")]
+			schema_drift,
 		})
 	}
 }
@@ -171,10 +204,10 @@ async fn apply_inner(
 	instance_id: &str,
 ) -> crate::Result<(usize, usize)> {
 	let mut applied_migrations = 0;
+	let mut migration_errors: Vec<String> = Vec::new();
 
-	// Apply pending migrations
+	// Apply pending migrations (each wrapped in its own transaction)
 	for migration in &plan.pending_migrations {
-		// Switch to main DB for migration execution
 		db.use_ns(&plan.meta.ns).use_db(&plan.meta.db).await?;
 
 		info!(
@@ -183,51 +216,76 @@ async fn apply_inner(
 			"applying migration"
 		);
 
-		// Execute the migration SQL
-		let response = db.query(&migration.content).await.map_err(|e| {
-			Error::Migration(format!(
+		let wrapped = format!(
+			"BEGIN TRANSACTION;\n{}\nCOMMIT TRANSACTION;",
+			migration.content
+		);
+
+		let migration_result = match db.query(&wrapped).await {
+			Ok(response) => match response.check() {
+				Ok(_) => Ok(()),
+				Err(e) => Err(format!(
+					"migration v{:03}_{} had errors: {e}",
+					migration.version, migration.name,
+				)),
+			},
+			Err(e) => Err(format!(
 				"migration v{:03}_{} failed: {e}",
 				migration.version, migration.name,
-			))
-		})?;
+			)),
+		};
 
-		// Check for query errors
-		response.check().map_err(|e| {
-			Error::Migration(format!(
-				"migration v{:03}_{} had errors: {e}",
-				migration.version, migration.name,
-			))
-		})?;
-
-		// Switch to _system DB to record
 		db.use_ns(&plan.meta.ns)
 			.use_db(&plan.meta.system_db)
 			.await?;
 
-		// Record in migration_lock
-		record_migration(db, migration, instance_id).await?;
+		match migration_result {
+			Ok(()) => {
+				record_migration(db, migration, instance_id).await?;
 
-		// Record in changelog
-		changelog::record_entry(
-			db,
-			"migration",
-			migration.version,
-			&migration.name,
-			&migration.checksum,
-			instance_id,
-		)
-		.await?;
+				changelog::record_entry(
+					db,
+					"migration",
+					migration.version,
+					&migration.name,
+					&migration.checksum,
+					instance_id,
+				)
+				.await?;
 
-		applied_migrations += 1;
+				applied_migrations += 1;
 
-		info!(
-			version = migration.version,
-			name = %migration.name,
-			"migration applied successfully"
-		);
+				info!(
+					version = migration.version,
+					name = %migration.name,
+					"migration applied successfully"
+				);
+			}
+			Err(err_msg) => {
+				error!(
+					version = migration.version,
+					name = %migration.name,
+					error = %err_msg,
+					"migration failed, stopping — subsequent migrations depend on prior state"
+				);
+
+				changelog::record_entry(
+					db,
+					"migration_failed",
+					migration.version,
+					&migration.name,
+					&migration.checksum,
+					instance_id,
+				)
+				.await?;
+
+				migration_errors.push(err_msg);
+				break;
+			}
+		}
 	}
 
-	// Apply schema modules
+	// Apply schema modules (no transaction — DEFINE OVERWRITE is idempotent)
 	db.use_ns(&plan.meta.ns).use_db(&plan.meta.db).await?;
 	let mut applied_modules = 0;
 
@@ -262,6 +320,14 @@ async fn apply_inner(
 	if !plan.functions_to_validate.is_empty() {
 		db.use_ns(&plan.meta.ns).use_db(&plan.meta.db).await?;
 		validate::validate_functions(db, &plan.functions_to_validate).await?;
+	}
+
+	if !migration_errors.is_empty() {
+		return Err(Error::Migration(format!(
+			"{} migration(s) failed:\n{}",
+			migration_errors.len(),
+			migration_errors.join("\n")
+		)));
 	}
 
 	Ok((applied_migrations, applied_modules))
@@ -301,21 +367,25 @@ async fn read_applied(db: &Surreal<Any>) -> crate::Result<Vec<AppliedMigration>>
 
 	let mut applied = Vec::with_capacity(rows.len());
 	for row in rows {
-		let version = row.get("version").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+		let version = row
+			.get("version")
+			.and_then(|v| v.as_u64())
+			.ok_or_else(|| Error::Migration("corrupt migration_lock: missing version".into()))?
+			as u32;
 		let applied_at = row
 			.get("applied_at")
 			.and_then(|v| v.as_str())
-			.unwrap_or("")
+			.ok_or_else(|| Error::Migration("corrupt migration_lock: missing applied_at".into()))?
 			.to_string();
 		let checksum = row
 			.get("checksum")
 			.and_then(|v| v.as_str())
-			.unwrap_or("")
+			.ok_or_else(|| Error::Migration("corrupt migration_lock: missing checksum".into()))?
 			.to_string();
 		let instance_id = row
 			.get("instance_id")
 			.and_then(|v| v.as_str())
-			.unwrap_or("")
+			.ok_or_else(|| Error::Migration("corrupt migration_lock: missing instance_id".into()))?
 			.to_string();
 
 		applied.push(AppliedMigration {
@@ -388,8 +458,44 @@ pub async fn plan(db: &Surreal<Any>, manifest: &Manifest) -> crate::Result<Plan>
 		}
 	}
 
-	// 4. Compute pending migrations
+	// 4. Detect duplicate versions between applied and filesystem migrations
+	//    (e.g., two different migrations both claiming to be v003)
 	let applied_versions: HashSet<u32> = applied.iter().map(|a| a.version).collect();
+	let filesystem_versions: HashSet<u32> = all_migrations.iter().map(|m| m.version).collect();
+	let overlapping: Vec<u32> = applied_versions
+		.intersection(&filesystem_versions)
+		.copied()
+		.collect();
+
+	for version in &overlapping {
+		if let (Some(applied_entry), Some(fs_entry)) = (
+			applied.iter().find(|a| a.version == *version),
+			all_migrations.iter().find(|m| m.version == *version),
+		) && applied_entry.checksum != fs_entry.checksum
+		{
+			return Err(Error::ChecksumMismatch {
+				version: *version,
+				name: fs_entry.name.clone(),
+				expected: fs_entry.checksum.clone(),
+				actual: applied_entry.checksum.clone(),
+			});
+		}
+	}
+
+	// Check for duplicate versions among pending migrations themselves
+	{
+		let mut seen = HashSet::new();
+		for m in &all_migrations {
+			if !seen.insert(m.version) {
+				return Err(Error::Migration(format!(
+					"duplicate migration version in plan: v{:03}",
+					m.version,
+				)));
+			}
+		}
+	}
+
+	// 5. Compute pending migrations
 	let pending_migrations: Vec<Migration> = all_migrations
 		.into_iter()
 		.filter(|m| !applied_versions.contains(&m.version))
@@ -400,5 +506,220 @@ pub async fn plan(db: &Surreal<Any>, manifest: &Manifest) -> crate::Result<Plan>
 		pending_migrations,
 		schema_modules,
 		functions_to_validate,
+		#[cfg(feature = "shadow")]
+		manifest: manifest.clone(),
 	})
+}
+
+/// Roll back applied migrations to a target version.
+///
+/// Finds all applied migrations with version > `target_version`, executes their
+/// `.down.surql` content in reverse order, removes them from `migration_lock`,
+/// and records each rollback in the changelog.
+///
+/// Returns an error in `RollbackResult::errors` for any migration that lacks a
+/// `.down.surql` companion file — those migrations are skipped (not rolled back).
+pub async fn rollback(
+	db: &Surreal<Any>,
+	manifest: &Manifest,
+	target_version: u32,
+) -> crate::Result<RollbackResult> {
+	let instance_id = uuid::Uuid::new_v4().to_string();
+
+	// Load all known migrations (from preloaded data or filesystem)
+	let all_migrations = match &manifest.preloaded_migrations {
+		Some(m) => m.clone(),
+		None => discover_migrations(manifest.root_path()?)?,
+	};
+
+	// Switch to _system DB to read applied migrations
+	db.use_ns(&manifest.meta.ns)
+		.use_db(&manifest.meta.system_db)
+		.await?;
+
+	// Bootstrap is idempotent — safe to run every time
+	let _ = db.query(BOOTSTRAP_SQL).await;
+
+	let applied = read_applied(db).await?;
+
+	// Find applied migrations with version > target that need rollback
+	let mut to_rollback: Vec<&AppliedMigration> = applied
+		.iter()
+		.filter(|a| a.version > target_version)
+		.collect();
+
+	// Roll back in reverse version order
+	to_rollback.sort_by(|a, b| b.version.cmp(&a.version));
+
+	if to_rollback.is_empty() {
+		info!(
+			target_version,
+			"nothing to roll back — no migrations above target version"
+		);
+		db.use_ns(&manifest.meta.ns)
+			.use_db(&manifest.meta.db)
+			.await?;
+		return Ok(RollbackResult {
+			rolled_back: Vec::new(),
+			target_version,
+			errors: Vec::new(),
+		});
+	}
+
+	// Acquire distributed lock
+	let lock = SurrealLock::new(db.clone(), instance_id.clone(), "migration")?;
+	lock.acquire().await?;
+
+	let mut rolled_back = Vec::new();
+	let mut errors = Vec::new();
+
+	for applied_mig in &to_rollback {
+		let migration = all_migrations
+			.iter()
+			.find(|m| m.version == applied_mig.version);
+
+		let down_content = migration.and_then(|m| m.down_content.as_deref());
+
+		match down_content {
+			None => {
+				let msg = format!(
+					"v{:03}: no .down.surql file — cannot roll back",
+					applied_mig.version,
+				);
+				error!(version = applied_mig.version, "{msg}");
+				errors.push(msg);
+				continue;
+			}
+			Some(sql) => {
+				// Execute the down migration against the application DB
+				db.use_ns(&manifest.meta.ns)
+					.use_db(&manifest.meta.db)
+					.await?;
+
+				let wrapped = format!("BEGIN TRANSACTION;\n{}\nCOMMIT TRANSACTION;", sql);
+
+				let exec_result = match db.query(&wrapped).await {
+					Ok(response) => match response.check() {
+						Ok(_) => Ok(()),
+						Err(e) => Err(format!(
+							"v{:03}: down migration had errors: {e}",
+							applied_mig.version,
+						)),
+					},
+					Err(e) => Err(format!(
+						"v{:03}: down migration failed: {e}",
+						applied_mig.version,
+					)),
+				};
+
+				// Switch back to _system for bookkeeping
+				db.use_ns(&manifest.meta.ns)
+					.use_db(&manifest.meta.system_db)
+					.await?;
+
+				match exec_result {
+					Ok(()) => {
+						// Remove from migration_lock
+						db.query(DELETE_MIGRATION_SQL)
+							.bind(("version", applied_mig.version as i64))
+							.await
+							.map_err(|e| {
+								Error::Migration(format!(
+									"failed to remove v{:03} from migration_lock: {e}",
+									applied_mig.version,
+								))
+							})?;
+
+						let name = migration.map(|m| m.name.as_str()).unwrap_or("unknown");
+
+						changelog::record_entry(
+							db,
+							"rollback",
+							applied_mig.version,
+							name,
+							&applied_mig.checksum,
+							&instance_id,
+						)
+						.await?;
+
+						let label = format!("v{:03}_{}", applied_mig.version, name);
+						info!(version = applied_mig.version, name, "rolled back");
+						rolled_back.push(label);
+					}
+					Err(err_msg) => {
+						error!(
+							version = applied_mig.version,
+							error = %err_msg,
+							"rollback failed, stopping — further rollbacks would leave DB in worse state"
+						);
+						errors.push(err_msg);
+						break;
+					}
+				}
+			}
+		}
+	}
+
+	if let Err(e) = lock.release().await {
+		error!("failed to release migration lock: {e}");
+	}
+
+	// Leave DB pointing at the main application database
+	db.use_ns(&manifest.meta.ns)
+		.use_db(&manifest.meta.db)
+		.await?;
+
+	info!(
+		rolled_back = rolled_back.len(),
+		errors = errors.len(),
+		target_version,
+		"rollback complete"
+	);
+
+	Ok(RollbackResult {
+		rolled_back,
+		target_version,
+		errors,
+	})
+}
+
+/// Post-apply verification: apply the manifest to a shadow DB and compare with the real DB.
+///
+/// Returns `Some(diff_string)` if schema drift is detected, `None` if schemas match.
+/// This is warning-only — the migrations already applied successfully.
+#[cfg(feature = "shadow")]
+async fn verify_against_shadow_after_apply(
+	db: &Surreal<Any>,
+	meta: &ManifestMeta,
+	manifest: &Manifest,
+) -> Option<String> {
+	use tracing::warn;
+
+	db.use_ns(&meta.ns).use_db(&meta.db).await.ok()?;
+
+	let real_db_info = match validate::query_db_info(db).await {
+		Ok(info) => info,
+		Err(e) => {
+			warn!("post-apply verification: failed to query real DB info: {e}");
+			return None;
+		}
+	};
+
+	let shadow = match crate::shadow::apply_to_shadow(manifest).await {
+		Ok(s) => s,
+		Err(e) => {
+			warn!("post-apply verification: shadow apply failed: {e}");
+			return None;
+		}
+	};
+
+	let diff = validate::compare_db_info(&shadow.db_info, &real_db_info);
+	if diff.is_empty() {
+		info!("post-apply verification: schema matches shadow DB");
+		None
+	} else {
+		let drift = format!("{diff}");
+		warn!("post-apply verification: schema drift detected:\n{drift}");
+		Some(drift)
+	}
 }

@@ -150,6 +150,7 @@ pub(crate) fn topological_sort(modules: &[ModuleConfig]) -> crate::Result<Vec<Mo
 		if let Some(deps) = dependents.get(name) {
 			let mut next = Vec::new();
 			for &dep in deps {
+				// All deps validated to exist at lines 110-118; in_degree populated from the same set
 				let degree = in_degree.get_mut(dep).unwrap();
 				*degree -= 1;
 				if *degree == 0 {

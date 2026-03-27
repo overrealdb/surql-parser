@@ -1,4 +1,4 @@
-error: Invalid SurrealQL: Invalid query: Unexpected token `USER`, expected Eof
+error: Invalid SurrealQL: Parse error: Invalid query: Unexpected token `USER`, expected Eof
  --> [1:14]
   |
 1 | SELEC * FORM user

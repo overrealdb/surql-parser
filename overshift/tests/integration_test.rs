@@ -698,3 +698,48 @@ fn different_instances_get_different_ids() {
 		assert_ne!(r1.instance_id, r2.instance_id);
 	});
 }
+
+#[test]
+fn should_reject_duplicate_in_plan() {
+	let rt = runtime();
+	let db = connect();
+
+	let tmp = tempfile::tempdir().unwrap();
+	let mig_dir = tmp.path().join("migrations");
+	std::fs::create_dir(&mig_dir).unwrap();
+
+	std::fs::write(mig_dir.join("v001_init.surql"), "-- init").unwrap();
+	std::fs::write(mig_dir.join("v002_seed.surql"), "-- seed v1").unwrap();
+	std::fs::write(mig_dir.join("v003_first.surql"), "-- first").unwrap();
+	std::fs::write(
+		tmp.path().join("manifest.toml"),
+		r#"
+		[meta]
+		ns = "test_dup_plan"
+		db = "main"
+		system_db = "_system"
+	"#,
+	)
+	.unwrap();
+
+	let manifest = Manifest::load(tmp.path()).unwrap();
+
+	rt.block_on(async {
+		let plan = overshift::plan(&db, &manifest).await.unwrap();
+		plan.apply(&db).await.unwrap();
+
+		// Modify v002 content after it was already applied — checksum mismatch
+		std::fs::write(mig_dir.join("v002_seed.surql"), "-- seed v2 MODIFIED").unwrap();
+
+		let result = overshift::plan(&db, &manifest).await;
+		assert!(
+			result.is_err(),
+			"should detect checksum mismatch for already-applied v002"
+		);
+		let err = result.unwrap_err().to_string();
+		assert!(
+			err.contains("checksum mismatch"),
+			"expected checksum mismatch error, got: {err}"
+		);
+	});
+}

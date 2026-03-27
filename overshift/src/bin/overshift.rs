@@ -29,6 +29,10 @@ enum Command {
 		/// Dry-run mode (same as `plan`).
 		#[arg(long)]
 		dry_run: bool,
+		/// Only verify schema matches between shadow DB and target (no apply).
+		#[cfg(feature = "shadow")]
+		#[arg(long)]
+		verify_only: bool,
 	},
 	/// Generate `generated/current.surql` schema snapshot.
 	Snapshot {
@@ -60,8 +64,42 @@ async fn main() -> anyhow::Result<()> {
 			let plan = overshift::plan(&db, &manifest).await?;
 			plan.print();
 		}
-		Command::Apply { path, url, dry_run } => {
+		Command::Apply {
+			path,
+			url,
+			dry_run,
+			#[cfg(feature = "shadow")]
+			verify_only,
+		} => {
 			let manifest = overshift::Manifest::load(&path)?;
+
+			#[cfg(feature = "shadow")]
+			if verify_only {
+				let shadow = overshift::shadow::apply_to_shadow(&manifest).await?;
+				if !shadow.errors.is_empty() {
+					for err in &shadow.errors {
+						eprintln!("shadow error: {err}");
+					}
+				}
+
+				let db = any::connect(&url).await?;
+				db.use_ns(&manifest.meta.ns)
+					.use_db(&manifest.meta.db)
+					.await?;
+				let target_info = overshift::validate::query_db_info(&db).await?;
+
+				let diff = overshift::validate::compare_db_info(&shadow.db_info, &target_info);
+
+				if diff.is_empty() {
+					println!("Schema matches: shadow DB and target are in sync.");
+					std::process::exit(0);
+				} else {
+					println!("Schema drift detected:");
+					print!("{diff}");
+					std::process::exit(1);
+				}
+			}
+
 			let db = any::connect(&url).await?;
 			let plan = overshift::plan(&db, &manifest).await?;
 
@@ -94,7 +132,7 @@ async fn main() -> anyhow::Result<()> {
 				overshift::snapshot::write(&manifest)?;
 				println!(
 					"Snapshot written to {}",
-					manifest.generated_dir().join("current.surql").display(),
+					manifest.generated_dir()?.join("current.surql").display(),
 				);
 			}
 		}

@@ -1,5 +1,8 @@
-use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 use std::path::Path;
+
+use sha2::{Digest, Sha256};
+use tracing::warn;
 use walkdir::WalkDir;
 
 use crate::Error;
@@ -11,6 +14,7 @@ pub struct Migration {
 	pub name: String,
 	pub content: String,
 	pub checksum: String,
+	pub down_content: Option<String>,
 }
 
 /// A migration that has already been applied to the database.
@@ -32,7 +36,8 @@ pub fn compute_checksum(content: &str) -> String {
 /// Discover migration files from `{root}/migrations/`.
 ///
 /// Files must match the pattern `v{NNN}_{name}.surql` (e.g. `v001_initial.surql`).
-/// Returns migrations sorted by version, validated for contiguity starting at 1.
+/// Returns migrations sorted by version. Duplicate versions produce an error listing
+/// both filenames. Non-contiguous versions emit a `tracing::warn` but do not fail.
 pub fn discover_migrations(root: &Path) -> crate::Result<Vec<Migration>> {
 	let migrations_dir = root.join("migrations");
 	if !migrations_dir.exists() {
@@ -40,6 +45,7 @@ pub fn discover_migrations(root: &Path) -> crate::Result<Vec<Migration>> {
 	}
 
 	let mut migrations = Vec::new();
+	let mut version_to_filenames: HashMap<u32, Vec<String>> = HashMap::new();
 
 	for entry in WalkDir::new(&migrations_dir)
 		.min_depth(1)
@@ -50,28 +56,85 @@ pub fn discover_migrations(root: &Path) -> crate::Result<Vec<Migration>> {
 		let path = entry.path();
 
 		if path.extension().is_some_and(|ext| ext == "surql") {
-			let filename = path
+			let file_name_os = path
+				.file_name()
+				.and_then(|s| s.to_str())
+				.ok_or_else(|| Error::Migration(format!("invalid filename: {}", path.display())))?;
+			let full_filename = file_name_os.to_string();
+
+			// Skip .down.surql files — they are loaded as companions to their up migration
+			if full_filename.ends_with(".down.surql") {
+				continue;
+			}
+
+			let stem = path
 				.file_stem()
 				.and_then(|s| s.to_str())
 				.ok_or_else(|| Error::Migration(format!("invalid filename: {}", path.display())))?;
 
-			let (version, name) = parse_migration_filename(filename)?;
+			let (version, name) = parse_migration_filename(stem)?;
+
+			version_to_filenames
+				.entry(version)
+				.or_default()
+				.push(full_filename);
+
 			let content = std::fs::read_to_string(path)
 				.map_err(|e| Error::Migration(format!("failed to read {}: {e}", path.display())))?;
 			let checksum = compute_checksum(&content);
+
+			// Check for companion .down.surql file
+			let down_path = path.with_extension("down.surql");
+			let down_content = if down_path.exists() {
+				Some(std::fs::read_to_string(&down_path).map_err(|e| {
+					Error::Migration(format!("failed to read {}: {e}", down_path.display()))
+				})?)
+			} else {
+				None
+			};
 
 			migrations.push(Migration {
 				version,
 				name,
 				content,
 				checksum,
+				down_content,
 			});
 		}
 	}
 
+	detect_duplicate_versions(&version_to_filenames)?;
+
 	migrations.sort_by_key(|m| m.version);
 	validate_migration_sequence(&migrations)?;
 	Ok(migrations)
+}
+
+/// Return an error if any version number maps to more than one file.
+fn detect_duplicate_versions(
+	version_to_filenames: &HashMap<u32, Vec<String>>,
+) -> crate::Result<()> {
+	let mut duplicates: Vec<(u32, &[String])> = version_to_filenames
+		.iter()
+		.filter(|(_, files)| files.len() > 1)
+		.map(|(version, files)| (*version, files.as_slice()))
+		.collect();
+
+	if duplicates.is_empty() {
+		return Ok(());
+	}
+
+	duplicates.sort_by_key(|(v, _)| *v);
+
+	let descriptions: Vec<String> = duplicates
+		.iter()
+		.map(|(version, files)| format!("v{version:03}: {}", files.join(", ")))
+		.collect();
+
+	Err(Error::Migration(format!(
+		"duplicate migration version(s): {}",
+		descriptions.join("; "),
+	)))
 }
 
 /// Parse a migration filename like `v001_initial_seed` into (1, "initial_seed").
@@ -99,7 +162,12 @@ fn parse_migration_filename(filename: &str) -> crate::Result<(u32, String)> {
 	Ok((version, name.to_string()))
 }
 
-/// Validate that migrations are contiguous starting at 1 with no duplicates.
+/// Validate migration sequence ordering.
+///
+/// - Duplicate versions are rejected with an error.
+/// - Non-contiguous versions (gaps) emit a `tracing::warn` but do not fail,
+///   allowing workflows where a gap is intentional or temporary.
+/// - Migrations must still start at version 1.
 pub(crate) fn validate_migration_sequence(migrations: &[Migration]) -> crate::Result<()> {
 	let mut seen = std::collections::HashSet::new();
 	for m in migrations {
@@ -121,10 +189,24 @@ pub(crate) fn validate_migration_sequence(migrations: &[Migration]) -> crate::Re
 
 	for pair in migrations.windows(2) {
 		if pair[1].version != pair[0].version + 1 {
-			return Err(Error::Migration(format!(
-				"non-contiguous versions: {} and {}",
-				pair[0].version, pair[1].version,
-			)));
+			let gap_start = pair[0].version + 1;
+			let gap_end = pair[1].version - 1;
+			if gap_start == gap_end {
+				warn!(
+					missing_version = gap_start,
+					"non-contiguous migration versions: gap between v{:03} and v{:03}",
+					pair[0].version,
+					pair[1].version,
+				);
+			} else {
+				warn!(
+					missing_from = gap_start,
+					missing_to = gap_end,
+					"non-contiguous migration versions: gap between v{:03} and v{:03}",
+					pair[0].version,
+					pair[1].version,
+				);
+			}
 		}
 	}
 
@@ -191,22 +273,24 @@ mod tests {
 	}
 
 	#[test]
-	fn validate_rejects_gap() {
+	fn validate_warns_on_gap_but_succeeds() {
 		let migrations = vec![
 			Migration {
 				version: 1,
 				name: "a".into(),
 				content: "".into(),
 				checksum: "".into(),
+				down_content: None,
 			},
 			Migration {
 				version: 3,
 				name: "c".into(),
 				content: "".into(),
 				checksum: "".into(),
+				down_content: None,
 			},
 		];
-		assert!(validate_migration_sequence(&migrations).is_err());
+		assert!(validate_migration_sequence(&migrations).is_ok());
 	}
 
 	#[test]
@@ -216,6 +300,7 @@ mod tests {
 			name: "b".into(),
 			content: "".into(),
 			checksum: "".into(),
+			down_content: None,
 		}];
 		assert!(validate_migration_sequence(&migrations).is_err());
 	}
@@ -228,12 +313,14 @@ mod tests {
 				name: "a".into(),
 				content: "".into(),
 				checksum: "".into(),
+				down_content: None,
 			},
 			Migration {
 				version: 1,
 				name: "a_dup".into(),
 				content: "".into(),
 				checksum: "".into(),
+				down_content: None,
 			},
 		];
 		assert!(validate_migration_sequence(&migrations).is_err());
@@ -246,6 +333,7 @@ mod tests {
 			name: "init".into(),
 			content: "SELECT 1;".into(),
 			checksum: compute_checksum("SELECT 1;"),
+			down_content: None,
 		}];
 		assert!(validate_migration_sequence(&migrations).is_ok());
 	}
@@ -258,6 +346,7 @@ mod tests {
 				name: format!("m{v}"),
 				content: format!("SELECT {v};"),
 				checksum: compute_checksum(&format!("SELECT {v};")),
+				down_content: None,
 			})
 			.collect();
 		assert!(validate_migration_sequence(&migrations).is_ok());

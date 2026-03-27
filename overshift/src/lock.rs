@@ -48,17 +48,22 @@ pub struct SurrealLock {
 pub type MigrationLock = SurrealLock;
 
 impl SurrealLock {
-	pub fn new(client: Surreal<Any>, instance_id: String, scope: impl Into<String>) -> Self {
+	pub fn new(
+		client: Surreal<Any>,
+		instance_id: String,
+		scope: impl Into<String>,
+	) -> crate::Result<Self> {
 		let scope = scope.into();
-		assert!(
-			!scope.is_empty() && scope.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'),
-			"lock scope must be non-empty ASCII alphanumeric/underscore, got: {scope:?}"
-		);
-		Self {
+		if scope.is_empty() || !scope.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+			return Err(crate::Error::Lock(format!(
+				"lock scope must be non-empty ASCII alphanumeric/underscore, got: {scope:?}"
+			)));
+		}
+		Ok(Self {
 			client,
 			instance_id,
 			scope,
-		}
+		})
 	}
 
 	fn record_id(&self) -> String {
@@ -66,6 +71,9 @@ impl SurrealLock {
 	}
 
 	/// Try to acquire the leader lock, retrying until successful or timed out.
+	///
+	/// Retries up to 30 times with a 2-second interval, giving a total timeout
+	/// of approximately 60 seconds before returning an error.
 	pub async fn acquire(&self) -> crate::Result<()> {
 		for attempt in 1..=MAX_RETRIES {
 			if self.try_acquire().await? {

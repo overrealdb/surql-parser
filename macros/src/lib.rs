@@ -12,6 +12,16 @@ use proc_macro::TokenStream;
 use quote::quote;
 use syn::{LitStr, Token, parse_macro_input};
 
+mod query_inference;
+mod type_check;
+
+use query_inference::infer_param_types_from_query;
+use type_check::{
+	extract_rust_param_types, format_rust_type, surql_type_matches_rust, type_hint_for_surql,
+};
+
+// ─── Macros ───
+
 /// Validates a SurrealQL string at compile time.
 ///
 /// Parses the given string literal as SurrealQL. If parsing succeeds, the macro
@@ -50,6 +60,10 @@ pub fn surql_check(input: TokenStream) -> TokenStream {
 ///
 /// This macro goes beyond [`surql_check!`] by also extracting `$param` placeholders
 /// from the query and verifying that the caller provides matching parameter names.
+///
+/// When `schema = "path/"` is provided, the macro also performs type inference:
+/// it looks up field types in the schema and checks that Rust variable types
+/// are compatible with the SurrealQL field types used in WHERE clauses.
 ///
 /// # Usage
 ///
@@ -103,7 +117,7 @@ pub fn surql_query(input: TokenStream) -> TokenStream {
 
 	// 3. If caller provided param names, verify they match
 	if !input.params.is_empty() {
-		let provided: Vec<String> = input.params.iter().map(|p| p.to_string()).collect();
+		let provided: Vec<String> = input.params.iter().map(|p| p.ident.to_string()).collect();
 
 		// Check for missing params (in query but not provided)
 		for qp in &query_params {
@@ -131,41 +145,137 @@ pub fn surql_query(input: TokenStream) -> TokenStream {
 							.join(", ")
 					}
 				);
-				return syn::Error::new(input.params[i].span(), msg)
+				return syn::Error::new(input.params[i].ident.span(), msg)
 					.to_compile_error()
 					.into();
 			}
 		}
 	}
 
-	// 4. Expand to the string literal
+	// 4. Schema-based type checking for parameters
+	if let Some(ref schema_lit) = input.schema {
+		let schema_path = schema_lit.value();
+		let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".into());
+		let full_path = std::path::Path::new(&manifest_dir).join(&schema_path);
+
+		if !full_path.exists() {
+			let msg = format!("schema path '{}' does not exist", schema_path);
+			return syn::Error::new(schema_lit.span(), msg)
+				.to_compile_error()
+				.into();
+		}
+
+		// Load all field types from the schema
+		let field_types = match surql_parser::collect_field_types(&full_path) {
+			Ok(fts) => fts
+				.into_iter()
+				.map(|ft| (ft.table, ft.field, ft.kind))
+				.collect::<Vec<_>>(),
+			Err(e) => {
+				let msg = format!("failed to scan schema files: {e}");
+				return syn::Error::new(schema_lit.span(), msg)
+					.to_compile_error()
+					.into();
+			}
+		};
+
+		// Infer type constraints from the query
+		let constraints = infer_param_types_from_query(&sql, &field_types);
+
+		// Check typed parameters against inferred constraints
+		for param in &input.params {
+			if let Some(ref rust_type) = param.ty {
+				let param_name = param.ident.to_string();
+				let rust_type_str = format_rust_type(rust_type);
+
+				for constraint in &constraints {
+					if constraint.param_name == param_name
+						&& !surql_type_matches_rust(&constraint.surql_type, &rust_type_str)
+					{
+						let hint = type_hint_for_surql(&constraint.surql_type);
+						let msg = format!(
+							"type mismatch for parameter `${param_name}`: \
+							 Rust type `{rust_type_str}` is not compatible with \
+							 SurrealQL type `{}`\n\
+							 \x20 inferred from: {}\n\
+							 \x20 expected Rust types: {hint}",
+							constraint.surql_type, constraint.source
+						);
+						return syn::Error::new(param.ident.span(), msg)
+							.to_compile_error()
+							.into();
+					}
+				}
+			}
+		}
+	}
+
+	// 5. Expand to the string literal
 	let lit = &input.sql;
 	quote! { #lit }.into()
 }
 
-/// Parsed input for `surql_query!`: a string literal followed by optional param names.
+/// A parameter in surql_query! with an optional Rust type annotation.
+struct QueryParam {
+	ident: syn::Ident,
+	ty: Option<syn::Type>,
+}
+
+/// Parsed input for `surql_query!`: a string literal, optional params with types,
+/// and optional `schema = "path/"`.
 struct SurqlQueryInput {
 	sql: LitStr,
-	params: Vec<syn::Ident>,
+	params: Vec<QueryParam>,
+	schema: Option<LitStr>,
 }
 
 impl syn::parse::Parse for SurqlQueryInput {
 	fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
 		let sql: LitStr = input.parse()?;
 		let mut params = Vec::new();
+		let mut schema = None;
+
 		while input.peek(Token![,]) {
 			let _: Token![,] = input.parse()?;
 			if input.is_empty() {
 				break;
 			}
+
+			// Check for `schema = "path/"` attribute
+			if input.peek(syn::Ident) {
+				let fork = input.fork();
+				let ident: syn::Ident = fork.parse()?;
+				if ident == "schema" && fork.peek(Token![=]) {
+					// Consume from the real stream
+					let _ident: syn::Ident = input.parse()?;
+					let _: Token![=] = input.parse()?;
+					schema = Some(input.parse()?);
+					continue;
+				}
+			}
+
+			// Parse param: either `name` or `name: Type`
 			let ident: syn::Ident = input.parse()?;
-			params.push(ident);
+			let ty = if input.peek(Token![:]) {
+				let _: Token![:] = input.parse()?;
+				Some(input.parse()?)
+			} else {
+				None
+			};
+
+			params.push(QueryParam { ident, ty });
 		}
-		Ok(SurqlQueryInput { sql, params })
+
+		Ok(SurqlQueryInput {
+			sql,
+			params,
+			schema,
+		})
 	}
 }
 
-/// Validates a SurrealQL function name at compile time.
+/// Validates a SurrealQL function name (and optionally parameter count and types)
+/// at compile time.
 ///
 /// Place this attribute on a Rust function with a string literal argument
 /// like `"fn::get_entity"`. The macro validates at compile time that:
@@ -173,9 +283,15 @@ impl syn::parse::Parse for SurqlQueryInput {
 /// 1. The name starts with `fn::`
 /// 2. The name is syntactically valid as a SurrealQL function call
 ///
+/// Optionally, provide `schema = "path/"` to also validate:
+///
+/// 3. Scans `.surql` files under the schema path for a matching DEFINE FUNCTION
+/// 4. Compares Rust function parameter count with SurrealQL parameter count
+/// 5. Checks that each Rust parameter type is compatible with the SurrealQL type
+///
 /// The annotated function is preserved as-is (the macro only adds a doc comment).
 ///
-/// # Example
+/// # Examples
 ///
 /// ```
 /// use surql_macros::surql_function;
@@ -195,7 +311,8 @@ impl syn::parse::Parse for SurqlQueryInput {
 /// ```
 #[proc_macro_attribute]
 pub fn surql_function(attr: TokenStream, item: TokenStream) -> TokenStream {
-	let fn_name = parse_macro_input!(attr as LitStr);
+	let parsed_attr = parse_macro_input!(attr as SurqlFunctionAttr);
+	let fn_name = &parsed_attr.name;
 	let name = fn_name.value();
 
 	// Must start with fn::
@@ -214,6 +331,107 @@ pub fn surql_function(attr: TokenStream, item: TokenStream) -> TokenStream {
 			.into();
 	}
 
+	// Parse the Rust function to count its parameters
+	let item_clone: proc_macro2::TokenStream = item.clone().into();
+	let rust_fn: syn::ItemFn = match syn::parse2(item_clone) {
+		Ok(f) => f,
+		Err(e) => return e.to_compile_error().into(),
+	};
+
+	// If schema path provided, validate parameter count and types against DEFINE FUNCTION
+	if let Some(ref schema_lit) = parsed_attr.schema {
+		let schema_path = schema_lit.value();
+		let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".into());
+		let full_path = std::path::Path::new(&manifest_dir).join(&schema_path);
+
+		if !full_path.exists() {
+			let msg = format!("schema path '{}' does not exist", schema_path);
+			return syn::Error::new(schema_lit.span(), msg)
+				.to_compile_error()
+				.into();
+		}
+
+		match surql_parser::find_function_params(&name, &full_path) {
+			Ok(Some(surql_params)) => {
+				let rust_param_count = count_fn_params(&rust_fn);
+				let surql_param_count = surql_params.len();
+
+				if rust_param_count != surql_param_count {
+					let param_list = if surql_params.is_empty() {
+						"none".to_string()
+					} else {
+						surql_params
+							.iter()
+							.map(|p| format!("${}: {}", p.name, p.kind))
+							.collect::<Vec<_>>()
+							.join(", ")
+					};
+					let msg = format!(
+						"parameter count mismatch for {name}: \
+						 Rust function has {rust_param_count} parameter(s), \
+						 but DEFINE FUNCTION has {surql_param_count} ({param_list})"
+					);
+					return syn::Error::new(fn_name.span(), msg)
+						.to_compile_error()
+						.into();
+				}
+
+				// Type checking: compare each Rust param type with SurrealQL param type
+				let rust_params = extract_rust_param_types(&rust_fn);
+				for (i, surql_param) in surql_params.iter().enumerate() {
+					if i >= rust_params.len() {
+						break;
+					}
+					let (ref rust_name, ref rust_type_str) = rust_params[i];
+					let surql_type = &surql_param.kind;
+
+					if !surql_type_matches_rust(surql_type, rust_type_str) {
+						let hint = type_hint_for_surql(surql_type);
+						let msg = format!(
+							"type mismatch for {name} parameter ${}: \
+							 SurrealQL type is `{surql_type}` but Rust type is `{rust_type_str}`\n\
+							 \x20 expected Rust types for `{surql_type}`: {hint}",
+							surql_param.name
+						);
+						// Point to the specific parameter in the Rust function
+						let span = rust_fn
+							.sig
+							.inputs
+							.iter()
+							.filter(|arg| matches!(arg, syn::FnArg::Typed(_)))
+							.nth(i)
+							.map(|arg| {
+								use syn::spanned::Spanned;
+								arg.span()
+							})
+							.unwrap_or_else(|| {
+								use syn::spanned::Spanned;
+								rust_fn.sig.span()
+							});
+						return syn::Error::new(span, msg).to_compile_error().into();
+					}
+
+					// If param names differ, note it (not an error, just informational)
+					let _ = rust_name;
+				}
+			}
+			Ok(None) => {
+				let msg = format!(
+					"DEFINE FUNCTION not found for '{name}' in schema path '{schema_path}'"
+				);
+				return syn::Error::new(fn_name.span(), msg)
+					.to_compile_error()
+					.into();
+			}
+			Err(e) => {
+				let msg = format!("failed to scan schema files: {e}");
+				return syn::Error::new(schema_lit.span(), msg)
+					.to_compile_error()
+					.into();
+			}
+		}
+	}
+
 	// Return the function as-is with a doc attribute
 	let item = proc_macro2::TokenStream::from(item);
 	let doc = format!(" SurrealQL function: `{name}`");
@@ -222,4 +440,43 @@ pub fn surql_function(attr: TokenStream, item: TokenStream) -> TokenStream {
 		#item
 	}
 	.into()
+}
+
+/// Count non-self, non-receiver parameters in a Rust function signature.
+fn count_fn_params(func: &syn::ItemFn) -> usize {
+	func.sig
+		.inputs
+		.iter()
+		.filter(|arg| matches!(arg, syn::FnArg::Typed(_)))
+		.count()
+}
+
+/// Parsed attribute for `#[surql_function("fn::name", schema = "path/")]`.
+struct SurqlFunctionAttr {
+	name: LitStr,
+	schema: Option<LitStr>,
+}
+
+impl syn::parse::Parse for SurqlFunctionAttr {
+	fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
+		let name: LitStr = input.parse()?;
+		let mut schema = None;
+
+		if input.peek(Token![,]) {
+			let _: Token![,] = input.parse()?;
+			if !input.is_empty() {
+				let key: syn::Ident = input.parse()?;
+				if key != "schema" {
+					return Err(syn::Error::new(
+						key.span(),
+						format!("unexpected attribute '{key}', expected 'schema'"),
+					));
+				}
+				let _: Token![=] = input.parse()?;
+				schema = Some(input.parse()?);
+			}
+		}
+
+		Ok(SurqlFunctionAttr { name, schema })
+	}
 }
