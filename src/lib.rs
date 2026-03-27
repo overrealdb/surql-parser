@@ -20,6 +20,7 @@ extern crate tracing;
 
 pub mod compat;
 pub mod config;
+pub mod error;
 
 #[cfg(feature = "build")]
 pub mod build;
@@ -33,8 +34,23 @@ pub mod build;
 pub mod upstream;
 
 pub mod builtins_generated;
+pub mod diff;
+pub mod doc_urls;
+pub mod filesystem;
+pub mod formatting;
+pub mod keywords;
+pub mod lint;
+pub mod params;
 pub mod recovery;
 pub mod schema_graph;
+pub mod schema_lookup;
+
+// Re-export for backward compat
+pub use error::{Error, Result};
+pub use filesystem::*;
+pub use keywords::all_keywords;
+pub use params::*;
+pub use schema_lookup::*;
 
 // ─── Public API ───
 
@@ -48,20 +64,21 @@ pub mod schema_graph;
 /// let ast = surql_parser::parse("CREATE user SET name = 'Alice'").unwrap();
 /// assert_eq!(ast.expressions.len(), 1);
 /// ```
-pub fn parse(input: &str) -> anyhow::Result<Ast> {
-	upstream::syn::parse(input)
+pub fn parse(input: &str) -> Result<Ast> {
+	upstream::syn::parse(input).map_err(|e| Error::Parse(e.to_string()))
 }
 
 /// Parse a SurrealQL query with custom parser settings.
-pub fn parse_with_settings(input: &str, settings: ParserSettings) -> anyhow::Result<Ast> {
+pub fn parse_with_settings(input: &str, settings: ParserSettings) -> Result<Ast> {
 	upstream::syn::parse_with_settings(input.as_bytes(), settings, async |parser, stk| {
 		parser.parse_query(stk).await
 	})
+	.map_err(|e| Error::Parse(e.to_string()))
 }
 
 /// Parse a SurrealQL type annotation (e.g., `record<user>`, `option<string>`).
-pub fn parse_kind(input: &str) -> anyhow::Result<Kind> {
-	upstream::syn::kind(input)
+pub fn parse_kind(input: &str) -> Result<Kind> {
+	upstream::syn::kind(input).map_err(|e| Error::Parse(e.to_string()))
 }
 
 /// Check if a string could be a reserved keyword in certain contexts.
@@ -115,7 +132,7 @@ pub struct SchemaDefinitions {
 /// assert_eq!(defs.indexes.len(), 1);
 /// assert_eq!(defs.functions.len(), 1);
 /// ```
-pub fn extract_definitions(input: &str) -> anyhow::Result<SchemaDefinitions> {
+pub fn extract_definitions(input: &str) -> Result<SchemaDefinitions> {
 	let ast = parse(input)?;
 	extract_definitions_from_ast(&ast.expressions)
 }
@@ -123,7 +140,7 @@ pub fn extract_definitions(input: &str) -> anyhow::Result<SchemaDefinitions> {
 /// Extract definitions from pre-parsed statements (e.g., from error-recovering parser).
 pub fn extract_definitions_from_ast(
 	stmts: &[upstream::sql::ast::TopLevelExpr],
-) -> anyhow::Result<SchemaDefinitions> {
+) -> Result<SchemaDefinitions> {
 	let mut defs = SchemaDefinitions::default();
 
 	for top in stmts {
@@ -193,7 +210,7 @@ fn extract_use_context(
 ///
 /// assert_eq!(fns, vec!["greet", "add"]);
 /// ```
-pub fn list_functions(input: &str) -> anyhow::Result<Vec<String>> {
+pub fn list_functions(input: &str) -> Result<Vec<String>> {
 	let defs = extract_definitions(input)?;
 	Ok(defs
 		.functions
@@ -220,7 +237,7 @@ pub fn list_functions(input: &str) -> anyhow::Result<Vec<String>> {
 ///
 /// assert_eq!(tables, vec!["user", "post"]);
 /// ```
-pub fn list_tables(input: &str) -> anyhow::Result<Vec<String>> {
+pub fn list_tables(input: &str) -> Result<Vec<String>> {
 	let defs = extract_definitions(input)?;
 	Ok(defs
 		.tables
@@ -248,401 +265,6 @@ pub fn format(ast: &Ast) -> String {
 	let mut buf = String::new();
 	ast.fmt_sql(&mut buf, SqlFormat::SingleLine);
 	buf
-}
-
-// ─── Parameter Extraction ───
-
-/// Extract all `$param` names used in a SurrealQL query.
-///
-/// Parses the input, then scans for parameter tokens. Returns a sorted,
-/// deduplicated list of parameter names (without the `$` prefix).
-///
-/// Parameters inside `DEFINE FUNCTION` signatures are excluded —
-/// only "free" parameters (query-level bindings) are returned.
-///
-/// # Example
-///
-/// ```
-/// let params = surql_parser::extract_params(
-///     "SELECT * FROM user WHERE age > $min AND name = $name"
-/// ).unwrap();
-/// assert_eq!(params, vec!["min", "name"]);
-/// ```
-pub fn extract_params(input: &str) -> anyhow::Result<Vec<String>> {
-	// Validate syntax first
-	parse(input)?;
-	// Extract params via lexer-level scan (handles strings, comments correctly)
-	Ok(scan_params(input))
-}
-
-/// Scan a (known-valid) SurrealQL string for `$param` tokens.
-///
-/// Skips string literals and comments. Returns sorted, deduplicated names.
-fn scan_params(input: &str) -> Vec<String> {
-	let mut params = std::collections::BTreeSet::new();
-	let bytes = input.as_bytes();
-	let len = bytes.len();
-	let mut i = 0;
-
-	while i < len {
-		match bytes[i] {
-			// Skip single-quoted strings: 'text''s escaped'
-			b'\'' => {
-				i += 1;
-				while i < len {
-					if bytes[i] == b'\'' {
-						i += 1;
-						if i < len && bytes[i] == b'\'' {
-							i += 1; // escaped ''
-							continue;
-						}
-						break;
-					}
-					i += 1;
-				}
-			}
-			// Skip double-quoted strings: "text\"s escaped"
-			b'"' => {
-				i += 1;
-				while i < len {
-					if bytes[i] == b'\\' {
-						i += 2;
-						continue;
-					}
-					if bytes[i] == b'"' {
-						i += 1;
-						break;
-					}
-					i += 1;
-				}
-			}
-			// Skip backtick-quoted identifiers: `field name`
-			b'`' => {
-				i += 1;
-				while i < len {
-					if bytes[i] == b'`' {
-						i += 1;
-						break;
-					}
-					i += 1;
-				}
-			}
-			// Skip line comments: -- ...
-			b'-' if i + 1 < len && bytes[i + 1] == b'-' => {
-				i += 2;
-				while i < len && bytes[i] != b'\n' {
-					i += 1;
-				}
-			}
-			// Skip block comments: /* ... */
-			b'/' if i + 1 < len && bytes[i + 1] == b'*' => {
-				i += 2;
-				let mut depth = 1u32;
-				while i + 1 < len && depth > 0 {
-					if bytes[i] == b'/' && bytes[i + 1] == b'*' {
-						depth += 1;
-						i += 2;
-					} else if bytes[i] == b'*' && bytes[i + 1] == b'/' {
-						depth -= 1;
-						i += 2;
-					} else {
-						i += 1;
-					}
-				}
-			}
-			// Collect $param
-			b'$' => {
-				i += 1;
-				let start = i;
-				while i < len && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
-					i += 1;
-				}
-				if i > start {
-					let name = &input[start..i];
-					params.insert(name.to_string());
-				}
-			}
-			_ => i += 1,
-		}
-	}
-
-	params.into_iter().collect()
-}
-
-// ─── Keywords ───
-
-/// All SurrealQL keywords recognized by the parser.
-///
-/// Generated directly from the parser's `Keyword` enum via `as_str()`.
-/// Cannot drift — any new keyword in the enum is automatically included.
-pub fn all_keywords() -> &'static [&'static str] {
-	use std::sync::LazyLock;
-	use upstream::syn::token::Keyword;
-
-	// Every Keyword variant, extracted from the enum definition.
-	// Cannot drift: adding a variant to Keyword without adding it here
-	// causes a compile error (missing match arm in the macro expansion).
-	static KEYWORDS: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
-		vec![
-			Keyword::Access.as_str(),
-			Keyword::After.as_str(),
-			Keyword::Algorithm.as_str(),
-			Keyword::All.as_str(),
-			Keyword::Alter.as_str(),
-			Keyword::Always.as_str(),
-			Keyword::Analyzer.as_str(),
-			Keyword::Api.as_str(),
-			Keyword::As.as_str(),
-			Keyword::Ascending.as_str(),
-			Keyword::Ascii.as_str(),
-			Keyword::Assert.as_str(),
-			Keyword::Async.as_str(),
-			Keyword::At.as_str(),
-			Keyword::Authenticate.as_str(),
-			Keyword::Auto.as_str(),
-			Keyword::Backend.as_str(),
-			Keyword::Batch.as_str(),
-			Keyword::Bearer.as_str(),
-			Keyword::Before.as_str(),
-			Keyword::Begin.as_str(),
-			Keyword::Blank.as_str(),
-			Keyword::Bucket.as_str(),
-			Keyword::Reject.as_str(),
-			Keyword::Bm25.as_str(),
-			Keyword::Break.as_str(),
-			Keyword::By.as_str(),
-			Keyword::Camel.as_str(),
-			Keyword::Cancel.as_str(),
-			Keyword::Cascade.as_str(),
-			Keyword::ChangeFeed.as_str(),
-			Keyword::Changes.as_str(),
-			Keyword::Capacity.as_str(),
-			Keyword::Class.as_str(),
-			Keyword::Comment.as_str(),
-			Keyword::Commit.as_str(),
-			Keyword::Compact.as_str(),
-			Keyword::Concurrently.as_str(),
-			Keyword::Config.as_str(),
-			Keyword::Content.as_str(),
-			Keyword::Continue.as_str(),
-			Keyword::Computed.as_str(),
-			Keyword::Count.as_str(),
-			Keyword::Create.as_str(),
-			Keyword::Database.as_str(),
-			Keyword::Default.as_str(),
-			Keyword::Define.as_str(),
-			Keyword::Delete.as_str(),
-			Keyword::Descending.as_str(),
-			Keyword::Diff.as_str(),
-			Keyword::Dimension.as_str(),
-			Keyword::Distance.as_str(),
-			Keyword::Drop.as_str(),
-			Keyword::Duplicate.as_str(),
-			Keyword::Efc.as_str(),
-			Keyword::Edgengram.as_str(),
-			Keyword::Event.as_str(),
-			Keyword::Else.as_str(),
-			Keyword::End.as_str(),
-			Keyword::Enforced.as_str(),
-			Keyword::Exclude.as_str(),
-			Keyword::Exists.as_str(),
-			Keyword::Expired.as_str(),
-			Keyword::Explain.as_str(),
-			Keyword::Expunge.as_str(),
-			Keyword::ExtendCandidates.as_str(),
-			Keyword::False.as_str(),
-			Keyword::Fetch.as_str(),
-			Keyword::Field.as_str(),
-			Keyword::Fields.as_str(),
-			Keyword::Filters.as_str(),
-			Keyword::Flexible.as_str(),
-			Keyword::For.as_str(),
-			Keyword::From.as_str(),
-			Keyword::Full.as_str(),
-			Keyword::Fulltext.as_str(),
-			Keyword::Function.as_str(),
-			Keyword::Functions.as_str(),
-			Keyword::Grant.as_str(),
-			Keyword::Graphql.as_str(),
-			Keyword::Group.as_str(),
-			Keyword::Headers.as_str(),
-			Keyword::Highlights.as_str(),
-			Keyword::Hnsw.as_str(),
-			Keyword::Ignore.as_str(),
-			Keyword::Include.as_str(),
-			Keyword::Index.as_str(),
-			Keyword::Info.as_str(),
-			Keyword::Insert.as_str(),
-			Keyword::Into.as_str(),
-			Keyword::If.as_str(),
-			Keyword::Is.as_str(),
-			Keyword::Issuer.as_str(),
-			Keyword::Jwt.as_str(),
-			Keyword::Jwks.as_str(),
-			Keyword::HashedVector.as_str(),
-			Keyword::Key.as_str(),
-			Keyword::KeepPrunedConnections.as_str(),
-			Keyword::Kill.as_str(),
-			Keyword::Let.as_str(),
-			Keyword::Limit.as_str(),
-			Keyword::Live.as_str(),
-			Keyword::Lowercase.as_str(),
-			Keyword::Lm.as_str(),
-			Keyword::M.as_str(),
-			Keyword::M0.as_str(),
-			Keyword::Mapper.as_str(),
-			Keyword::MaxDepth.as_str(),
-			Keyword::Middleware.as_str(),
-			Keyword::Merge.as_str(),
-			Keyword::Model.as_str(),
-			Keyword::Module.as_str(),
-			Keyword::Namespace.as_str(),
-			Keyword::Ngram.as_str(),
-			Keyword::No.as_str(),
-			Keyword::NoIndex.as_str(),
-			Keyword::None.as_str(),
-			Keyword::Null.as_str(),
-			Keyword::Numeric.as_str(),
-			Keyword::Omit.as_str(),
-			Keyword::On.as_str(),
-			Keyword::Only.as_str(),
-			Keyword::Option.as_str(),
-			Keyword::Order.as_str(),
-			Keyword::Original.as_str(),
-			Keyword::Overwrite.as_str(),
-			Keyword::Parallel.as_str(),
-			Keyword::Param.as_str(),
-			Keyword::Passhash.as_str(),
-			Keyword::Password.as_str(),
-			Keyword::Patch.as_str(),
-			Keyword::Permissions.as_str(),
-			Keyword::PostingsCache.as_str(),
-			Keyword::PostingsOrder.as_str(),
-			Keyword::Prepare.as_str(),
-			Keyword::Punct.as_str(),
-			Keyword::Purge.as_str(),
-			Keyword::Range.as_str(),
-			Keyword::Readonly.as_str(),
-			Keyword::Rebuild.as_str(),
-			Keyword::Reference.as_str(),
-			Keyword::Refresh.as_str(),
-			Keyword::Regex.as_str(),
-			Keyword::Relate.as_str(),
-			Keyword::Relation.as_str(),
-			Keyword::Remove.as_str(),
-			Keyword::Replace.as_str(),
-			Keyword::Retry.as_str(),
-			Keyword::Return.as_str(),
-			Keyword::Revoke.as_str(),
-			Keyword::Revoked.as_str(),
-			Keyword::Roles.as_str(),
-			Keyword::Root.as_str(),
-			Keyword::Schemafull.as_str(),
-			Keyword::Schemaless.as_str(),
-			Keyword::Scope.as_str(),
-			Keyword::Select.as_str(),
-			Keyword::Sequence.as_str(),
-			Keyword::Session.as_str(),
-			Keyword::Set.as_str(),
-			Keyword::Show.as_str(),
-			Keyword::Signin.as_str(),
-			Keyword::Signup.as_str(),
-			Keyword::Since.as_str(),
-			Keyword::Sleep.as_str(),
-			Keyword::Snowball.as_str(),
-			Keyword::Split.as_str(),
-			Keyword::Start.as_str(),
-			Keyword::Strict.as_str(),
-			Keyword::Structure.as_str(),
-			Keyword::System.as_str(),
-			Keyword::Table.as_str(),
-			Keyword::Tables.as_str(),
-			Keyword::TempFiles.as_str(),
-			Keyword::TermsCache.as_str(),
-			Keyword::TermsOrder.as_str(),
-			Keyword::Then.as_str(),
-			Keyword::Throw.as_str(),
-			Keyword::Timeout.as_str(),
-			Keyword::Tokenizers.as_str(),
-			Keyword::Token.as_str(),
-			Keyword::To.as_str(),
-			Keyword::Transaction.as_str(),
-			Keyword::True.as_str(),
-			Keyword::Type.as_str(),
-			Keyword::Unique.as_str(),
-			Keyword::Unset.as_str(),
-			Keyword::Update.as_str(),
-			Keyword::Upsert.as_str(),
-			Keyword::Uppercase.as_str(),
-			Keyword::Url.as_str(),
-			Keyword::Use.as_str(),
-			Keyword::User.as_str(),
-			Keyword::Value.as_str(),
-			Keyword::Values.as_str(),
-			Keyword::Version.as_str(),
-			Keyword::Vs.as_str(),
-			Keyword::When.as_str(),
-			Keyword::Where.as_str(),
-			Keyword::With.as_str(),
-			Keyword::AllInside.as_str(),
-			Keyword::AndKw.as_str(),
-			Keyword::AnyInside.as_str(),
-			Keyword::Inside.as_str(),
-			Keyword::Intersects.as_str(),
-			Keyword::NoneInside.as_str(),
-			Keyword::NotInside.as_str(),
-			Keyword::OrKw.as_str(),
-			Keyword::Outside.as_str(),
-			Keyword::Not.as_str(),
-			Keyword::And.as_str(),
-			Keyword::Collate.as_str(),
-			Keyword::ContainsAll.as_str(),
-			Keyword::ContainsAny.as_str(),
-			Keyword::ContainsNone.as_str(),
-			Keyword::ContainsNot.as_str(),
-			Keyword::Contains.as_str(),
-			Keyword::In.as_str(),
-			Keyword::Out.as_str(),
-			Keyword::Normal.as_str(),
-			Keyword::Any.as_str(),
-			Keyword::Array.as_str(),
-			Keyword::Geometry.as_str(),
-			Keyword::Record.as_str(),
-			Keyword::Bool.as_str(),
-			Keyword::Bytes.as_str(),
-			Keyword::Datetime.as_str(),
-			Keyword::Decimal.as_str(),
-			Keyword::Duration.as_str(),
-			Keyword::Float.as_str(),
-			Keyword::Fn.as_str(),
-			Keyword::Silo.as_str(),
-			Keyword::Mod.as_str(),
-			Keyword::Int.as_str(),
-			Keyword::Number.as_str(),
-			Keyword::Object.as_str(),
-			Keyword::String.as_str(),
-			Keyword::Uuid.as_str(),
-			Keyword::Ulid.as_str(),
-			Keyword::Rand.as_str(),
-			Keyword::References.as_str(),
-			Keyword::Feature.as_str(),
-			Keyword::Line.as_str(),
-			Keyword::Point.as_str(),
-			Keyword::Polygon.as_str(),
-			Keyword::MultiPoint.as_str(),
-			Keyword::MultiLine.as_str(),
-			Keyword::MultiPolygon.as_str(),
-			Keyword::Collection.as_str(),
-			Keyword::File.as_str(),
-			Keyword::FN.as_str(),
-			Keyword::ML.as_str(),
-			Keyword::Get.as_str(),
-			Keyword::Post.as_str(),
-			Keyword::Put.as_str(),
-			Keyword::Trace.as_str(),
-		]
-	});
-	&KEYWORDS
 }
 
 // ─── Diagnostics ───
@@ -675,7 +297,7 @@ pub struct ParseDiagnostic {
 /// assert!(!diags.is_empty());
 /// assert_eq!(diags[0].line, 1);
 /// ```
-pub fn parse_for_diagnostics(input: &str) -> Result<Ast, Vec<ParseDiagnostic>> {
+pub fn parse_for_diagnostics(input: &str) -> std::result::Result<Ast, Vec<ParseDiagnostic>> {
 	use upstream::syn::error::Location;
 	use upstream::syn::token::Span;
 
@@ -758,11 +380,11 @@ pub use upstream::sql::Idiom;
 /// A SurrealQL statement (SELECT, CREATE, DEFINE, etc.).
 pub use upstream::sql::statements;
 
-/// Syntax error type.
-pub use upstream::syn::error;
+/// Syntax error type from the upstream parser.
+pub use upstream::syn::error as syntax_error;
 
 pub use recovery::parse_with_recovery;
-pub use schema_graph::SchemaGraph;
+pub use schema_graph::{DependencyNode, SchemaGraph};
 
 // ─── Built-in Function Lookup ───
 
