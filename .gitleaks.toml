@@ -1,8 +1,8 @@
 [extend]
 useDefault = true
 
-[[allowlists]]
-description = "SurrealQL doc examples use example JWT key pairs (not real secrets)"
+[allowlist]
+description = "SurrealQL doc examples use example JWT key pairs from SurrealDB docs, not real secrets"
 paths = [
-    "tests/fixtures/doc-examples/.*\\.surql",
+    '''tests/fixtures/doc-examples/.*\.surql''',
 ]
