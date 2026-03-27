@@ -1,0 +1,3 @@
+RETURN session::ip();
+
+"2001:db8:3333:4444:CCCC:DDDD:EEEE:FFFF"

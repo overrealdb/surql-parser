@@ -1,0 +1,2 @@
+INFO FOR USER db_user ON DATABASE;
+INFO FOR USER db_user;

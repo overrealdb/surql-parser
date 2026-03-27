@@ -1,0 +1,42 @@
+[package]
+name = "surql-lsp"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+description = "Language Server Protocol implementation for SurrealQL"
+repository = "https://github.com/overrealdb/surql-parser"
+readme = "README.md"
+keywords = ["surrealdb", "surrealql", "lsp", "language-server", "ide"]
+categories = ["development-tools", "text-editors"]
+
+[lib]
+name = "surql_lsp"
+path = "src/lib.rs"
+
+[[bin]]
+name = "surql-lsp"
+path = "src/main.rs"
+
+[features]
+default = []
+embedded-db = ["dep:surrealdb", "dep:anyhow"]
+canonical-format = []
+
+[dependencies]
+surql-parser = { path = "..", version = "0.1" }
+tower-lsp = "0.20"
+tokio = { version = "1", features = ["full"] }
+dashmap = "6"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+toml = "0.8"
+surrealdb = { version = "3", default-features = false, features = ["kv-mem"], optional = true }
+anyhow = { version = "1", optional = true }
+
+[dev-dependencies]
+tokio-util = { version = "0.7", features = ["codec"] }
+bytes = "1"
+tempfile = "3"
+regex = "1"

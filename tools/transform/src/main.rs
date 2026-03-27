@@ -14,7 +14,7 @@ use clap::Parser as ClapParser;
 use proc_macro2::Span;
 use syn::visit_mut::VisitMut;
 use syn::{
-	Attribute, File, Ident, Item, ItemImpl, ItemMod, Meta, Path as SynPath, PathSegment, UseTree,
+	Attribute, File, Ident, Item, ItemImpl, ItemMod, Meta, Path as SynPath, PathSegment,
 	punctuated::Punctuated,
 };
 use walkdir::WalkDir;
@@ -189,6 +189,7 @@ impl Transformer {
 	}
 
 	/// Check if an attribute matches a name we want to cfg-wrap
+	#[allow(dead_code)]
 	fn should_cfg_wrap(attr: &Attribute, cfg_wrap: &HashMap<String, String>) -> Option<String> {
 		if let Meta::List(meta_list) = &attr.meta {
 			let path_str = quote::quote!(#meta_list.path).to_string();
@@ -307,10 +308,10 @@ impl VisitMut for Transformer {
 		// Apply import rewrites (longest prefix match first)
 		let mut best_match: Option<(&str, &str)> = None;
 		for (old_prefix, new_prefix) in &self.mappings.import_rewrites {
-			if Self::path_matches_prefix(path, old_prefix) {
-				if best_match.is_none() || old_prefix.len() > best_match.unwrap().0.len() {
-					best_match = Some((old_prefix.as_str(), new_prefix.as_str()));
-				}
+			if Self::path_matches_prefix(path, old_prefix)
+				&& (best_match.is_none() || old_prefix.len() > best_match.unwrap().0.len())
+			{
+				best_match = Some((old_prefix.as_str(), new_prefix.as_str()));
 			}
 		}
 

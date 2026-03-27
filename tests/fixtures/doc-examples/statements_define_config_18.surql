@@ -1,0 +1,3 @@
+DEFINE TABLE foo SCHEMAFUL;
+DEFINE FIELD val ON foo TYPE int;
+CREATE foo:1 SET val = 42;

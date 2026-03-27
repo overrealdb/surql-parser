@@ -1,5 +1,9 @@
 <p align="center">
-  <img src="assets/logo.svg" alt="surql-parser" width="120" />
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="icon-512.png" width="120" />
+    <source media="(prefers-color-scheme: light)" srcset="icon-light-512.png" width="120" />
+    <img src="icon-512.png" alt="surql-parser" width="120" />
+  </picture>
 </p>
 
 <h1 align="center">surql-parser</h1>
@@ -136,10 +140,12 @@ This generates constants like `FN_GET_USER: &str = "fn::get_user"` with doc comm
 cargo install surql-parser --features cli
 
 surql check schema/**/*.surql      # validate .surql files
-surql schema schema/               # extract full schema
 surql fmt file.surql               # format SurrealQL
-surql functions schema/            # list fn::* definitions
-surql tables schema/               # list table definitions
+surql info schema/                 # show schema summary
+surql diff schema/                 # show uncommitted schema changes
+surql docs schema/                 # generate markdown docs
+surql lint schema/                 # run SurrealQL-specific lints
+surql test tests/                  # run .surql test files
 ```
 
 ## Testing
@@ -172,6 +178,21 @@ The sync pipeline:
 2. Rewrites imports via declarative rules (`mappings.toml`)
 3. Strips execution-layer code (318 impl blocks removed automatically)
 4. Validates compilation
+
+## Workspace
+
+This repository is a Rust workspace with several crates:
+
+| Crate | Description |
+|-------|-------------|
+| [`surql-parser`](.) | Core parser — AST, schema graph, formatting, linting, diff |
+| [`surql-macros`](macros/) | Compile-time validation with schema-aware type checking |
+| [`surql-lsp`](lsp/) | Language Server — hover, completions, rename, diagnostics, 8 slash commands |
+| [`surql-mcp`](mcp/) | MCP playground — 15 tools (query, graph, verify, rollback) |
+| [`overshift`](overshift/) | Migration engine — schema modules, rollback, shadow DB verification |
+| [`surql` CLI](src/bin/surql.rs) | `check`, `fmt`, `info`, `diff`, `docs`, `lint`, `test` |
+| [Zed extension](editors/zed/) | Syntax highlighting, 8 slash commands, MCP context server |
+| [VS Code extension](editors/vscode/) | TextMate grammar, LSP client |
 
 ## License
 

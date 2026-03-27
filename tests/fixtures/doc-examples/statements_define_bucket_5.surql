@@ -1,0 +1,2 @@
+DEFINE BUCKET my_bucket BACKEND "memory";
+INFO FOR DB;

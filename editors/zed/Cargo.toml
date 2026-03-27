@@ -1,0 +1,16 @@
+[workspace]
+
+[package]
+name = "zed_surrealql"
+version = "0.1.0"
+edition = "2021"
+publish = false
+license = "Apache-2.0"
+
+[lib]
+path = "src/surrealql.rs"
+crate-type = ["cdylib"]
+
+[dependencies]
+zed_extension_api = "0.7.0"
+serde_json = "1"

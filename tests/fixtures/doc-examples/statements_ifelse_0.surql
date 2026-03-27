@@ -1,0 +1,3 @@
+IF @condition { @expression; .. }
+   [ ELSE IF @condition { @expression; .. } ] ...
+   [ ELSE { @expression; .. } ]

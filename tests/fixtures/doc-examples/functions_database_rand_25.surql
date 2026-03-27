@@ -1,0 +1,3 @@
+RETURN rand::ulid();
+
+[u"01H9QDG81Q7SB33RXB7BEZBK7G"]

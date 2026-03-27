@@ -1,0 +1,58 @@
+[package]
+name = "overshift"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+description = "Shared migration engine for the overrealdb ecosystem"
+repository = "https://github.com/overrealdb/surql-parser"
+keywords = ["surrealdb", "migration", "schema", "database"]
+categories = ["database"]
+rust-version = "1.94"
+readme = "README.md"
+exclude = [
+	".github/",
+	"tests/fixtures/",
+]
+
+[[bin]]
+name = "overshift"
+path = "src/bin/overshift.rs"
+required-features = ["cli"]
+
+[features]
+default = []
+cli = ["dep:clap", "dep:tracing-subscriber", "dep:anyhow", "surrealdb/protocol-ws"]
+shadow = ["surrealdb/kv-mem"]
+validate-docker = []
+validate-mem = []
+
+[dependencies]
+surql-parser = { path = "..", version = "0.1" }
+surql-macros = { path = "../macros", version = "0.1" }
+surrealdb = { version = "3", default-features = false }
+sha2 = "0.10"
+hex = "0.4"
+toml = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tracing = "0.1"
+uuid = { version = "1", features = ["v4"] }
+walkdir = "2"
+tokio = { version = "1", features = ["time"] }
+clap = { version = "4", features = ["derive"], optional = true }
+tracing-subscriber = { version = "0.3", optional = true }
+anyhow = { version = "1", optional = true }
+
+[dev-dependencies]
+pretty_assertions = "1"
+proptest = "1"
+tokio = { version = "1", features = ["full"] }
+surrealdb = { version = "3", default-features = false, features = ["protocol-ws", "protocol-http", "kv-mem"] }
+testcontainers = "0.23"
+testcontainers-modules = { version = "0.11", features = ["surrealdb"] }
+reqwest = { version = "0.12", features = ["json", "blocking"] }
+tempfile = "3"
+
+[build-dependencies]
+surql-parser = { path = "..", version = "0.1", features = ["build"] }

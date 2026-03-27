@@ -1,0 +1,1 @@
+DEFINE CONFIG GRAPHQL FUNCTIONS EXCLUDE [debugFunction, testFunction];

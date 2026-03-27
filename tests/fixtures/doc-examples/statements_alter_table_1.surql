@@ -1,0 +1,2 @@
+ALTER TABLE user COMPACT;
+-- NONE

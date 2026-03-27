@@ -1,0 +1,2 @@
+DEFINE TABLE person TYPE ANY;
+DEFINE TABLE person;

@@ -1,5 +1,6 @@
 [workspace]
-members = [".", "tools/transform", "macros", "examples/sample-project"]
+members = [".", "tools/transform", "macros", "examples/sample-project", "lsp", "mcp", "overshift"]
+exclude = ["editors/zed"]
 
 [package]
 name = "surql-parser"
@@ -47,6 +48,9 @@ argon2 = "0.5"
 jsonwebtoken = "10"
 storekey = "0.11"
 walkdir = { version = "2", optional = true }
+toml = { version = "0.8", optional = true }
+surrealdb = { version = "3", default-features = false, features = ["kv-mem"], optional = true }
+tokio = { version = "1", features = ["rt-multi-thread"], optional = true }
 
 [[bin]]
 name = "surql"
@@ -58,11 +62,12 @@ default = []
 arbitrary = []    # placeholder for upstream cfg_attr(feature = "arbitrary", ...)
 surrealism = []   # placeholder for upstream cfg_attr(feature = "surrealism", ...)
 build = ["dep:walkdir"]
-cli = ["dep:clap", "dep:walkdir"]
+cli = ["dep:clap", "dep:walkdir", "dep:toml"]
 # Validation modes (Layer 3 testing):
 # Validation features only activate dev-dependencies in tests — zero impact on library users.
 validate-mem = []      # in-memory SurrealDB (no Docker)
 validate-docker = []   # testcontainers SurrealDB (reliable)
+test-runner = ["dep:surrealdb", "dep:tokio"]
 
 [dependencies.clap]
 version = "4"

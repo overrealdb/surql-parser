@@ -1,0 +1,9 @@
+[meta]
+ns = "overrealdb"
+db = "main"
+system_db = "_system"
+
+[[modules]]
+name = "schema"
+path = "surql/schema"
+depends_on = []

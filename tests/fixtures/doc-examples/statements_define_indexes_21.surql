@@ -1,0 +1,2 @@
+DEFINE ANALYZER simple TOKENIZERS blank,class FILTERS lowercase;
+DEFINE INDEX title_index ON blog FIELDS title SEARCH ANALYZER simple BM25(1.2,0.75) HIGHLIGHTS DEFER;

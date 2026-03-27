@@ -1,4 +1,4 @@
-//! Build-time helpers for SurrealQL schema validation and code generation.
+//! Build-time SurrealQL schema validation and code generation.
 //!
 //! Call these functions from your `build.rs` to validate `.surql` files and
 //! generate typed Rust constants for SurrealQL functions at compile time.
@@ -26,42 +26,95 @@ use surrealdb_types::{SqlFormat, ToSql};
 
 /// Validate all `.surql` files in a directory at build time.
 ///
-/// Walks `dir` recursively, parses every `.surql` file, and panics with
-/// detailed error messages if any file fails to parse. Emits
+/// Walks `dir` recursively, parses every `.surql` file, and prints
+/// `cargo:warning` for files that fail to parse. Emits
 /// `cargo:rerun-if-changed` directives for each file.
+///
+/// Returns the number of files with errors.
+pub fn validate_schema(dir: impl AsRef<Path>) -> usize {
+	validate_schema_inner(dir.as_ref(), true)
+}
+
+/// How the build should react to SurrealQL validation errors.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ValidationMode {
+	/// Print `cargo:warning` but don't fail the build.
+	Warn,
+	/// Panic and fail the build.
+	Fail,
+	/// Silently ignore errors (only return the count).
+	Ignore,
+}
+
+/// Validate all `.surql` files with a configurable error mode.
+///
+/// ```rust,no_run
+/// use surql_parser::build::{validate_schema_with, ValidationMode};
+/// validate_schema_with("surql/", ValidationMode::Fail);
+/// ```
+pub fn validate_schema_with(dir: impl AsRef<Path>, mode: ValidationMode) {
+	let errors = validate_schema_inner(dir.as_ref(), mode != ValidationMode::Ignore);
+	if mode == ValidationMode::Fail && errors > 0 {
+		panic!("SurrealQL validation failed: {errors} file(s) with errors");
+	}
+}
+
+/// Validate all `.surql` files in a directory at build time, failing on errors.
+///
+/// Calls [`validate_schema`] and panics if any files contain errors.
+/// Use this when invalid SurrealQL should be a hard build failure.
 ///
 /// # Panics
 ///
-/// Panics if any `.surql` file contains invalid SurrealQL.
-pub fn validate_schema(dir: impl AsRef<Path>) {
-	let dir = dir.as_ref();
+/// Panics if any `.surql` file fails to parse.
+pub fn validate_schema_or_fail(dir: impl AsRef<Path>) {
+	let errors = validate_schema(dir);
+	if errors > 0 {
+		panic!("SurrealQL validation failed: {errors} file(s) with errors");
+	}
+}
+
+fn validate_schema_inner(dir: &Path, emit_warnings: bool) -> usize {
 	println!("cargo:rerun-if-changed={}", dir.display());
 
-	let mut errors = Vec::new();
-	for entry in walkdir::WalkDir::new(dir)
-		.sort_by_file_name()
-		.into_iter()
-		.filter_map(|e| e.ok())
-	{
+	let mut error_count = 0;
+	for entry in walkdir::WalkDir::new(dir).sort_by_file_name().into_iter() {
+		let entry = match entry {
+			Ok(e) => e,
+			Err(e) => {
+				println!(
+					"cargo:warning=Skipping unreadable entry in {}: {e}",
+					dir.display()
+				);
+				continue;
+			}
+		};
 		let path = entry.path();
 		if path.extension().is_some_and(|ext| ext == "surql") {
 			println!("cargo:rerun-if-changed={}", path.display());
-			let content =
-				std::fs::read_to_string(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+			let content = match std::fs::read_to_string(path) {
+				Ok(c) => c,
+				Err(e) => {
+					if emit_warnings {
+						println!("cargo:warning=Failed to read {}: {e}", path.display());
+					}
+					error_count += 1;
+					continue;
+				}
+			};
 			if let Err(e) = crate::parse(&content) {
-				errors.push(format!("  {}: {e}", path.display()));
+				if emit_warnings {
+					println!("cargo:warning={}: Invalid query: {e}", path.display());
+				}
+				error_count += 1;
 			}
 		}
 	}
 
-	if !errors.is_empty() {
-		panic!(
-			"SurrealQL validation failed ({} error{}):\n{}",
-			errors.len(),
-			if errors.len() == 1 { "" } else { "s" },
-			errors.join("\n")
-		);
+	if error_count > 0 && emit_warnings {
+		println!("cargo:warning=SurrealQL validation: {error_count} file(s) with errors");
 	}
+	error_count
 }
 
 /// Generate typed Rust constants for SurrealQL functions defined in `.surql` files.
@@ -83,30 +136,56 @@ pub fn generate_typed_functions(schema_dir: impl AsRef<Path>, out_file: impl AsR
 
 	println!("cargo:rerun-if-changed={}", schema_dir.display());
 
-	let mut all_sql = String::new();
+	let mut defs = crate::SchemaDefinitions::default();
 	for entry in walkdir::WalkDir::new(schema_dir)
 		.sort_by_file_name()
 		.into_iter()
-		.filter_map(|e| e.ok())
 	{
+		let entry = match entry {
+			Ok(e) => e,
+			Err(e) => {
+				println!(
+					"cargo:warning=Skipping unreadable entry in {}: {e}",
+					schema_dir.display()
+				);
+				continue;
+			}
+		};
 		let path = entry.path();
 		if path.extension().is_some_and(|ext| ext == "surql") {
 			println!("cargo:rerun-if-changed={}", path.display());
-			let content =
-				std::fs::read_to_string(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
-			all_sql.push_str(&content);
-			all_sql.push('\n');
+			let content = match std::fs::read_to_string(path) {
+				Ok(c) => c,
+				Err(e) => {
+					println!("cargo:warning=Failed to read {}: {e}", path.display());
+					continue;
+				}
+			};
+			let (stmts, _) = crate::parse_with_recovery(&content);
+			match crate::extract_definitions_from_ast(&stmts) {
+				Ok(file_defs) => {
+					defs.functions.extend(file_defs.functions);
+				}
+				Err(e) => {
+					println!(
+						"cargo:warning=Failed to extract definitions from {}: {e}",
+						path.display()
+					);
+				}
+			}
 		}
 	}
-
-	let defs = crate::extract_definitions(&all_sql).expect("Failed to parse schema files");
 
 	let mut code = String::new();
 	code.push_str("// Auto-generated by surql-parser build helper.\n");
 	code.push_str("// Do not edit manually.\n\n");
 
+	let mut seen = std::collections::HashSet::new();
 	for func in &defs.functions {
 		let name = &func.name;
+		if !seen.insert(name.clone()) {
+			continue; // skip duplicate function definitions
+		}
 
 		// Build constant name: get_entity → FN_GET_ENTITY, ns::func → FN_NS_FUNC
 		let const_name = name
@@ -157,7 +236,12 @@ pub fn generate_typed_functions(schema_dir: impl AsRef<Path>, out_file: impl AsR
 	}
 
 	if let Some(parent) = out_file.parent() {
-		std::fs::create_dir_all(parent).ok();
+		if let Err(e) = std::fs::create_dir_all(parent) {
+			println!(
+				"cargo:warning=Failed to create directory {}: {e}",
+				parent.display()
+			);
+		}
 	}
 	std::fs::write(out_file, &code)
 		.unwrap_or_else(|e| panic!("Failed to write {}: {e}", out_file.display()));

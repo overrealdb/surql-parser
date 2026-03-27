@@ -1,0 +1,5 @@
+error: extra parameter `city` — not found in query (expected: $min)
+ --> tests/ui/fail_query_extra_param.rs:5:70
+  |
+5 |     let _sql = surql_query!("SELECT * FROM user WHERE age > $min", min, city);
+  |                                                                         ^^^^

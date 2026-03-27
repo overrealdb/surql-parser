@@ -1,4 +1,4 @@
-error: Invalid SurrealQL: Invalid query: Unexpected end of file, expected string to end.
+error: Invalid SurrealQL: Parse error: Invalid query: Unexpected end of file, expected string to end.
  --> [1:33]
   |
 1 | SELECT * FROM user WHERE name = 'Alice
