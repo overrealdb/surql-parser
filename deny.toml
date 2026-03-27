@@ -17,8 +17,6 @@ ignore = [
 
 [licenses]
 version = 2
-# surrealdb crates don't set license field in Cargo.toml (it's BUSL-1.1 in LICENSE file)
-unlicensed = "allow"
 allow = [
     "MIT",
     "Apache-2.0",
@@ -33,9 +31,32 @@ allow = [
     "OpenSSL",
     "BSL-1.0",
     "MPL-2.0",
-    "BUSL-1.1",   # surrealdb (dev-dep only)
+    "BUSL-1.1",
 ]
 confidence-threshold = 0.8
+
+# surrealdb crates omit the license field in Cargo.toml manifest
+# but are published under BUSL-1.1 (dev-dependency only)
+[[licenses.exceptions]]
+allow = ["BUSL-1.1"]
+name = "surrealdb"
+
+[[licenses.exceptions]]
+allow = ["BUSL-1.1"]
+name = "surrealdb-core"
+
+[[licenses.exceptions]]
+allow = ["BUSL-1.1"]
+name = "surrealdb-types"
+
+[[licenses.exceptions]]
+allow = ["BUSL-1.1"]
+name = "surrealdb-types-derive"
+
+# tokio-tungstenite-wasm has no license field but is MIT
+[[licenses.exceptions]]
+allow = ["MIT"]
+name = "tokio-tungstenite-wasm"
 
 [sources]
 unknown-registry = "deny"
