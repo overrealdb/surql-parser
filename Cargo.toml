@@ -4,7 +4,7 @@ exclude = ["editors/zed"]
 
 [package]
 name = "surql-parser"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2024"
 license = "Apache-2.0"
 description = "Standalone SurrealQL parser extracted from SurrealDB"
