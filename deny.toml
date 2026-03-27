@@ -17,6 +17,8 @@ ignore = [
 
 [licenses]
 version = 2
+# surrealdb crates don't set license field in Cargo.toml (it's BUSL-1.1 in LICENSE file)
+unlicensed = "allow"
 allow = [
     "MIT",
     "Apache-2.0",
