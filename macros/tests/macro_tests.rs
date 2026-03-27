@@ -9,7 +9,14 @@ fn compile_tests() {
 fn schema_validation_tests() {
 	let target_dir = std::env::var("CARGO_TARGET_DIR").unwrap_or_else(|_| {
 		let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap();
-		format!("{manifest}/target")
+		// macros/ is one level below workspace root; workspace target is at root
+		std::path::Path::new(&manifest)
+			.parent()
+			.unwrap()
+			.join("target")
+			.to_str()
+			.unwrap()
+			.to_string()
 	});
 	let trybuild_dir = std::path::PathBuf::from(&target_dir).join("tests/trybuild/surql-macros");
 
