@@ -51,7 +51,7 @@ jobs:
         run: |
           echo "DEFINE TABLE user SCHEMAFULL;" > /tmp/test.surql
           cargo run --features cli -- check /tmp/test.surql
-          cargo run --features cli -- schema /tmp/test.surql
+          cargo run --features cli -- info /tmp/test.surql
 
   # Docker validation — runs after fast checks pass (on main and approved PRs)
   validate:
