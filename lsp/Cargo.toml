@@ -5,7 +5,9 @@ edition = "2024"
 license = "Apache-2.0"
 description = "Language Server Protocol implementation for SurrealQL"
 repository = "https://github.com/overrealdb/surql-parser"
-publish = false
+readme = "README.md"
+keywords = ["surrealdb", "surrealql", "lsp", "language-server", "ide"]
+categories = ["development-tools", "text-editors"]
 
 [lib]
 name = "surql_lsp"

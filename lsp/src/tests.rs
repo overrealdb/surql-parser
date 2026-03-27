@@ -709,17 +709,18 @@ mod formatting {
 	#[test]
 	fn uppercases_lowercase_keywords() {
 		let edits = format_document("select * from user").unwrap();
-		assert!(edits.len() >= 2, "should have edits for select and from");
-		assert_eq!(edits[0].new_text, "SELECT");
+		let formatted = &edits[0].new_text;
+		assert!(formatted.contains("SELECT"), "should uppercase SELECT");
+		assert!(formatted.contains("FROM"), "should uppercase FROM");
 	}
 
 	#[test]
-	fn returns_per_keyword_edits() {
+	fn formats_all_keywords_in_query() {
 		let edits = format_document("select * from user where age > 18").unwrap();
-		let texts: Vec<&str> = edits.iter().map(|e| e.new_text.as_str()).collect();
-		assert!(texts.contains(&"SELECT"));
-		assert!(texts.contains(&"FROM"));
-		assert!(texts.contains(&"WHERE"));
+		let formatted = &edits[0].new_text;
+		assert!(formatted.contains("SELECT"));
+		assert!(formatted.contains("FROM"));
+		assert!(formatted.contains("WHERE"));
 	}
 
 	#[test]
@@ -815,15 +816,14 @@ mod keywords {
 
 	#[test]
 	fn no_duplicates() {
-		let mut sorted = all().to_vec();
-		sorted.sort();
-		sorted.dedup();
-		// IF appears twice in the list — one for control flow, one for DDL
-		// That's a minor issue but shouldn't cause problems
-		assert!(
-			sorted.len() >= all().len() - 5,
-			"Too many duplicates in keyword list"
-		);
+		let mut seen = std::collections::HashSet::new();
+		let mut dupes = Vec::new();
+		for kw in all() {
+			if !seen.insert(kw) {
+				dupes.push(kw);
+			}
+		}
+		assert!(dupes.is_empty(), "Duplicate keywords in list: {:?}", dupes);
 	}
 }
 
@@ -2004,6 +2004,99 @@ mod keyword_hover {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
+// 20b. KEYWORD HOVER COVERAGE
+// ═══════════════════════════════════════════════════════════════════════
+
+#[cfg(test)]
+mod keyword_coverage {
+	use crate::server::keyword_documentation;
+
+	#[test]
+	fn coverage_report() {
+		let all = surql_parser::all_keywords();
+		let mut covered = Vec::new();
+		let mut missing = Vec::new();
+
+		for kw in all {
+			if keyword_documentation(kw).is_some() {
+				covered.push(*kw);
+			} else {
+				missing.push(*kw);
+			}
+		}
+
+		let pct = covered.len() * 100 / all.len().max(1);
+		eprintln!(
+			"\n=== Keyword hover coverage: {}/{} ({pct}%) ===",
+			covered.len(),
+			all.len()
+		);
+		if !missing.is_empty() {
+			eprintln!("Missing ({}):", missing.len());
+			for chunk in missing.chunks(10) {
+				eprintln!("  {}", chunk.join(", "));
+			}
+		}
+
+		// Enforce minimum coverage — increase as we add more
+		assert!(
+			pct >= 25,
+			"Keyword hover coverage dropped below 25%: {pct}% ({}/{} keywords)",
+			covered.len(),
+			all.len()
+		);
+	}
+
+	#[test]
+	fn all_dml_keywords_have_docs() {
+		let required = [
+			"SELECT", "CREATE", "UPDATE", "DELETE", "INSERT", "UPSERT", "RELATE", "DEFINE",
+			"REMOVE", "LET", "RETURN", "IF", "FOR", "BEGIN", "COMMIT", "CANCEL", "LIVE", "KILL",
+			"USE", "INFO", "SLEEP", "THROW",
+		];
+		for kw in &required {
+			assert!(
+				keyword_documentation(kw).is_some(),
+				"DML keyword '{kw}' must have hover documentation"
+			);
+		}
+	}
+
+	#[test]
+	fn all_define_sub_keywords_have_docs() {
+		let required = [
+			"TABLE",
+			"FIELD",
+			"INDEX",
+			"FUNCTION",
+			"EVENT",
+			"ANALYZER",
+			"PARAM",
+			"ACCESS",
+			"NAMESPACE",
+			"DATABASE",
+		];
+		for kw in &required {
+			assert!(
+				keyword_documentation(kw).is_some(),
+				"DEFINE sub-keyword '{kw}' must have hover documentation"
+			);
+		}
+	}
+
+	#[test]
+	fn all_clause_keywords_have_docs() {
+		let required = ["WHERE", "ORDER", "GROUP", "LIMIT", "FROM", "SPLIT", "FETCH"];
+		for kw in &required {
+			assert!(
+				keyword_documentation(kw).is_some(),
+				"Clause keyword '{kw}' must have hover documentation"
+			);
+		}
+	}
+}
+
+// ═══════════════════════════════════════════════════════════════════════
 // 21. HOVER AND GOTO_DEF WITH SCHEMA CONTEXT
 // ═══════════════════════════════════════════════════════════════════════
 
@@ -2206,6 +2299,240 @@ mod find_references {
 		let mut locs = Vec::new();
 		find_word_occurrences(source, "nonexistent", &uri, &mut locs);
 		assert!(locs.is_empty());
+	}
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// 29b. SCHEMA-AWARE FIND REFERENCES
+// ═══════════════════════════════════════════════════════════════════════
+
+#[cfg(test)]
+mod schema_aware_references {
+	use crate::context::{
+		SymbolKind, classify_symbol_at_position, extract_all_table_occurrences,
+		find_field_references, find_function_references_in,
+	};
+	use tower_lsp::lsp_types::Position;
+
+	fn pos(line: u32, character: u32) -> Position {
+		Position { line, character }
+	}
+
+	// ─── classify_symbol_at_position ───
+
+	#[test]
+	fn should_classify_table_after_from() {
+		let source = "SELECT * FROM user;";
+		let sym = classify_symbol_at_position(source, pos(0, 16));
+		assert_eq!(sym, Some(SymbolKind::Table("user".into())));
+	}
+
+	#[test]
+	fn should_classify_table_in_define_table() {
+		let source = "DEFINE TABLE user SCHEMAFULL;";
+		let sym = classify_symbol_at_position(source, pos(0, 15));
+		assert_eq!(sym, Some(SymbolKind::Table("user".into())));
+	}
+
+	#[test]
+	fn should_classify_field_in_define_field() {
+		let source = "DEFINE FIELD name ON user TYPE string;";
+		let sym = classify_symbol_at_position(source, pos(0, 14));
+		assert_eq!(
+			sym,
+			Some(SymbolKind::Field {
+				table: "user".into(),
+				field: "name".into(),
+			})
+		);
+	}
+
+	#[test]
+	fn should_classify_table_after_on_in_define_field() {
+		let source = "DEFINE FIELD name ON user TYPE string;";
+		let sym = classify_symbol_at_position(source, pos(0, 22));
+		assert_eq!(sym, Some(SymbolKind::Table("user".into())));
+	}
+
+	#[test]
+	fn should_classify_field_in_where_clause() {
+		let source = "SELECT * FROM user WHERE name = 'Alice';";
+		let sym = classify_symbol_at_position(source, pos(0, 27));
+		assert_eq!(
+			sym,
+			Some(SymbolKind::Field {
+				table: "user".into(),
+				field: "name".into(),
+			})
+		);
+	}
+
+	#[test]
+	fn should_classify_function_with_fn_prefix() {
+		let source = "LET $g = fn::greet('World');";
+		let sym = classify_symbol_at_position(source, pos(0, 14));
+		assert_eq!(sym, Some(SymbolKind::Function("fn::greet".into())));
+	}
+
+	#[test]
+	fn should_classify_table_after_update() {
+		let source = "UPDATE user SET name = 'Bob';";
+		let sym = classify_symbol_at_position(source, pos(0, 9));
+		assert_eq!(sym, Some(SymbolKind::Table("user".into())));
+	}
+
+	#[test]
+	fn should_classify_field_after_set_in_update() {
+		let source = "UPDATE user SET name = 'Bob';";
+		let sym = classify_symbol_at_position(source, pos(0, 18));
+		assert_eq!(
+			sym,
+			Some(SymbolKind::Field {
+				table: "user".into(),
+				field: "name".into(),
+			})
+		);
+	}
+
+	// ─── find_field_references ───
+
+	#[test]
+	fn should_find_field_in_define_and_where() {
+		let source =
+			"DEFINE FIELD name ON user TYPE string;\nSELECT * FROM user WHERE name = 'Alice';";
+		let refs = find_field_references(source, "user", "name");
+		assert_eq!(
+			refs.len(),
+			2,
+			"field 'name' in DEFINE FIELD and WHERE clause"
+		);
+		assert_eq!(refs[0].line, 0);
+		assert_eq!(refs[1].line, 1);
+	}
+
+	#[test]
+	fn should_find_dot_access_field_refs() {
+		let source = "SELECT user.name FROM user;";
+		let refs = find_field_references(source, "user", "name");
+		assert_eq!(refs.len(), 1, "user.name dot access");
+		assert_eq!(refs[0].col, 12);
+	}
+
+	#[test]
+	fn should_not_find_field_on_wrong_table() {
+		let source = "DEFINE FIELD name ON post TYPE string;\nSELECT * FROM user WHERE name = 'x';";
+		let refs = find_field_references(source, "post", "name");
+		assert_eq!(
+			refs.len(),
+			1,
+			"only the DEFINE FIELD on post, not the WHERE on user"
+		);
+		assert_eq!(refs[0].line, 0);
+	}
+
+	#[test]
+	fn should_find_field_in_update_set() {
+		let source = "UPDATE user SET name = 'New';";
+		let refs = find_field_references(source, "user", "name");
+		assert_eq!(refs.len(), 1);
+	}
+
+	#[test]
+	fn should_find_field_in_insert_into() {
+		let source = "INSERT INTO user { name: 'Alice' };";
+		let refs = find_field_references(source, "user", "name");
+		assert_eq!(refs.len(), 1);
+	}
+
+	#[test]
+	fn should_return_empty_for_no_field_refs() {
+		let source = "SELECT * FROM user;";
+		let refs = find_field_references(source, "user", "email");
+		assert!(refs.is_empty());
+	}
+
+	// ─── extract_all_table_occurrences ───
+
+	#[test]
+	fn should_find_table_in_define_and_dml() {
+		let source =
+			"DEFINE TABLE user SCHEMAFULL;\nSELECT * FROM user;\nUPDATE user SET name = 'x';";
+		let refs = extract_all_table_occurrences(source, "user");
+		assert_eq!(refs.len(), 3, "DEFINE TABLE + FROM + UPDATE");
+	}
+
+	#[test]
+	fn should_find_table_in_record_type() {
+		let source = "DEFINE FIELD author ON post TYPE record<user>;";
+		let refs = extract_all_table_occurrences(source, "user");
+		assert_eq!(refs.len(), 1);
+	}
+
+	#[test]
+	fn should_find_table_in_record_id_separate() {
+		// Record ID like user:john is tokenized as a single token by the lexer,
+		// so we can't extract the table prefix from it without string-level parsing.
+		// This is a known limitation — record IDs in LET context won't be found.
+		let source = "LET $id = user:john;";
+		let refs = extract_all_table_occurrences(source, "user");
+		// May be 0 (lexer treats user:john as single token) or 1 (if split)
+		assert!(refs.len() <= 1, "record ID prefix detection is best-effort");
+	}
+
+	#[test]
+	fn should_find_table_after_from_with_record_id() {
+		let source = "SELECT * FROM user:john;";
+		let refs = extract_all_table_occurrences(source, "user");
+		assert!(
+			!refs.is_empty(),
+			"should find at least 1 reference for user in FROM user:john"
+		);
+	}
+
+	#[test]
+	fn should_find_table_in_define_field_on() {
+		let source = "DEFINE FIELD name ON user TYPE string;";
+		let refs = extract_all_table_occurrences(source, "user");
+		assert_eq!(refs.len(), 1);
+	}
+
+	#[test]
+	fn should_not_match_wrong_table() {
+		let source = "SELECT * FROM post;\nUPDATE post SET title = 'x';";
+		let refs = extract_all_table_occurrences(source, "user");
+		assert!(refs.is_empty());
+	}
+
+	// ─── find_function_references_in ───
+
+	#[test]
+	fn should_find_function_definition_and_calls() {
+		let source = "DEFINE FUNCTION fn::greet($n: string) -> string { RETURN 'hi'; };\nLET $x = fn::greet('World');\nLET $y = fn::greet('Test');";
+		let refs = find_function_references_in(source, "fn::greet");
+		assert_eq!(refs.len(), 3);
+	}
+
+	#[test]
+	fn should_not_match_fn_prefix_of_longer_name() {
+		let source = "LET $x = fn::greet_all('World');";
+		let refs = find_function_references_in(source, "fn::greet");
+		assert!(refs.is_empty(), "fn::greet should not match fn::greet_all");
+	}
+
+	#[test]
+	fn should_find_function_at_correct_positions() {
+		let source = "fn::greet('hi')";
+		let refs = find_function_references_in(source, "fn::greet");
+		assert_eq!(refs.len(), 1);
+		assert_eq!(refs[0].col, 0);
+		assert_eq!(refs[0].len, 9);
+	}
+
+	#[test]
+	fn should_return_empty_for_no_function_refs() {
+		let source = "SELECT * FROM user;";
+		let refs = find_function_references_in(source, "fn::greet");
+		assert!(refs.is_empty());
 	}
 }
 
@@ -3652,7 +3979,7 @@ mod cross_file_record_links {
 	#[test]
 	fn should_find_record_link_range() {
 		let source = "DEFINE FIELD author ON post TYPE record<user>;";
-		let range = find_record_link_range(source, "user");
+		let range = find_record_link_range(source, "user").expect("should find range");
 		assert_eq!(range.start.line, 0);
 		assert_eq!(
 			range.start.character,
@@ -3664,15 +3991,759 @@ mod cross_file_record_links {
 	#[test]
 	fn should_find_record_link_case_insensitive() {
 		let source = "DEFINE FIELD author ON post TYPE RECORD<User>;";
-		let range = find_record_link_range(source, "User");
+		let range = find_record_link_range(source, "User").expect("should find range");
 		assert!(range.start.character > 0, "should find the link");
 	}
 
 	#[test]
-	fn should_return_zero_range_for_missing() {
+	fn should_return_none_for_missing() {
 		let source = "DEFINE TABLE user SCHEMAFULL;";
 		let range = find_record_link_range(source, "nonexistent");
-		assert_eq!(range.start.line, 0);
-		assert_eq!(range.start.character, 0);
+		assert!(
+			range.is_none(),
+			"should return None when record link not found"
+		);
+	}
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// INLINE SUPPRESS COMMENTS
+// ═══════════════════════════════════════════════════════════════════════
+
+#[cfg(test)]
+mod inline_suppress {
+	use crate::server::line_has_suppress;
+
+	#[test]
+	fn should_suppress_with_double_slash_comment() {
+		let source = "SELECT * FROM metric // surql-allow: undefined-table";
+		assert!(line_has_suppress(source, 0, "undefined-table"));
+	}
+
+	#[test]
+	fn should_suppress_with_double_dash_comment() {
+		let source = "SELECT * FROM metric -- surql-allow: undefined-table";
+		assert!(line_has_suppress(source, 0, "undefined-table"));
+	}
+
+	#[test]
+	fn should_not_suppress_without_comment() {
+		let source = "SELECT * FROM metric";
+		assert!(!line_has_suppress(source, 0, "undefined-table"));
+	}
+
+	#[test]
+	fn should_not_suppress_wrong_code() {
+		let source = "SELECT * FROM metric // surql-allow: other-code";
+		assert!(!line_has_suppress(source, 0, "undefined-table"));
+	}
+
+	#[test]
+	fn should_suppress_case_insensitive() {
+		let source = "SELECT * FROM metric // SURQL-ALLOW: UNDEFINED-TABLE";
+		assert!(line_has_suppress(source, 0, "undefined-table"));
+	}
+
+	#[test]
+	fn should_suppress_on_correct_line() {
+		let source = "SELECT * FROM user;\nSELECT * FROM metric // surql-allow: undefined-table";
+		assert!(!line_has_suppress(source, 0, "undefined-table"));
+		assert!(line_has_suppress(source, 1, "undefined-table"));
+	}
+
+	#[test]
+	fn should_not_suppress_out_of_bounds_line() {
+		let source = "SELECT * FROM metric";
+		assert!(!line_has_suppress(source, 99, "undefined-table"));
+	}
+
+	#[test]
+	fn should_suppress_with_extra_whitespace() {
+		let source = "SELECT * FROM metric //   surql-allow:   undefined-table  ";
+		assert!(line_has_suppress(source, 0, "undefined-table"));
+	}
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// RENAME REFACTORING
+// ═══════════════════════════════════════════════════════════════════════
+
+#[cfg(test)]
+mod rename {
+	use crate::context::extract_all_table_occurrences;
+	use crate::server::{word_and_range_at_position, word_at_position};
+	use tower_lsp::lsp_types::Position;
+
+	#[test]
+	fn should_find_table_in_define_table() {
+		let source = "DEFINE TABLE user SCHEMAFULL;";
+		let refs = extract_all_table_occurrences(source, "user");
+		assert_eq!(refs.len(), 1);
+		assert_eq!(refs[0].name, "user");
+		assert_eq!(refs[0].line, 0);
+	}
+
+	#[test]
+	fn should_find_table_in_select_from() {
+		let source = "SELECT * FROM user;";
+		let refs = extract_all_table_occurrences(source, "user");
+		assert_eq!(refs.len(), 1);
+		assert_eq!(refs[0].name, "user");
+	}
+
+	#[test]
+	fn should_find_table_in_update() {
+		let source = "UPDATE user SET name = 'Alice';";
+		let refs = extract_all_table_occurrences(source, "user");
+		assert_eq!(refs.len(), 1);
+		assert_eq!(refs[0].name, "user");
+	}
+
+	#[test]
+	fn should_find_table_in_create() {
+		let source = "CREATE post SET title = 'hi';";
+		let refs = extract_all_table_occurrences(source, "post");
+		assert_eq!(refs.len(), 1);
+		assert_eq!(refs[0].name, "post");
+	}
+
+	#[test]
+	fn should_find_table_in_delete() {
+		let source = "DELETE user WHERE id = 1;";
+		let refs = extract_all_table_occurrences(source, "user");
+		assert_eq!(refs.len(), 1);
+		assert_eq!(refs[0].name, "user");
+	}
+
+	#[test]
+	fn should_find_table_in_upsert() {
+		let source = "UPSERT user SET name = 'Bob';";
+		let refs = extract_all_table_occurrences(source, "user");
+		assert_eq!(refs.len(), 1);
+		assert_eq!(refs[0].name, "user");
+	}
+
+	#[test]
+	fn should_find_table_in_insert_into() {
+		let source = "INSERT INTO user { name: 'Bob' };";
+		let refs = extract_all_table_occurrences(source, "user");
+		assert_eq!(refs.len(), 1);
+		assert_eq!(refs[0].name, "user");
+	}
+
+	#[test]
+	fn should_find_table_in_define_field_on() {
+		let source = "DEFINE FIELD name ON user TYPE string;";
+		let refs = extract_all_table_occurrences(source, "user");
+		assert_eq!(refs.len(), 1);
+		assert_eq!(refs[0].name, "user");
+	}
+
+	#[test]
+	fn should_find_table_in_define_field_on_table() {
+		let source = "DEFINE FIELD name ON TABLE user TYPE string;";
+		let refs = extract_all_table_occurrences(source, "user");
+		assert_eq!(refs.len(), 1);
+		assert_eq!(refs[0].name, "user");
+	}
+
+	#[test]
+	fn should_find_table_in_define_index_on() {
+		let source = "DEFINE INDEX idx_name ON user FIELDS name;";
+		let refs = extract_all_table_occurrences(source, "user");
+		assert_eq!(refs.len(), 1);
+		assert_eq!(refs[0].name, "user");
+	}
+
+	#[test]
+	fn should_find_table_in_define_event_on() {
+		let source = "DEFINE EVENT evt ON user WHEN $before != $after THEN {};";
+		let refs = extract_all_table_occurrences(source, "user");
+		assert_eq!(refs.len(), 1);
+		assert_eq!(refs[0].name, "user");
+	}
+
+	#[test]
+	fn should_find_table_in_record_type() {
+		let source = "DEFINE FIELD author ON post TYPE record<user>;";
+		let refs = extract_all_table_occurrences(source, "user");
+		assert_eq!(refs.len(), 1);
+		assert_eq!(refs[0].name, "user");
+	}
+
+	#[test]
+	fn should_find_table_in_record_id() {
+		let source = "SELECT * FROM user:tobie;";
+		let refs = extract_all_table_occurrences(source, "user");
+		// Should find both FROM user:tobie (via record ID pattern) and possibly FROM keyword
+		assert!(!refs.is_empty());
+		assert!(refs.iter().all(|r| r.name == "user"));
+	}
+
+	#[test]
+	fn should_find_all_occurrences_across_statements() {
+		let source = "\
+DEFINE TABLE user SCHEMAFULL;
+DEFINE FIELD name ON user TYPE string;
+DEFINE FIELD email ON user TYPE string;
+SELECT * FROM user;
+UPDATE user SET name = 'Alice';";
+		let refs = extract_all_table_occurrences(source, "user");
+		// DEFINE TABLE user + ON user + ON user + FROM user + UPDATE user = 5
+		assert_eq!(refs.len(), 5, "expected 5 occurrences, got: {refs:?}");
+	}
+
+	#[test]
+	fn should_not_find_unrelated_table() {
+		let source = "SELECT * FROM user;\nCREATE post SET title = 'hi';";
+		let refs = extract_all_table_occurrences(source, "account");
+		assert!(refs.is_empty());
+	}
+
+	#[test]
+	fn should_be_case_insensitive_for_table_name() {
+		let source = "SELECT * FROM User;";
+		let refs = extract_all_table_occurrences(source, "user");
+		assert_eq!(refs.len(), 1);
+	}
+
+	#[test]
+	fn should_return_empty_for_empty_source() {
+		let refs = extract_all_table_occurrences("", "user");
+		assert!(refs.is_empty());
+	}
+
+	#[test]
+	fn should_return_correct_line_and_col() {
+		let source = "DEFINE TABLE user SCHEMAFULL;\nSELECT * FROM user;";
+		let refs = extract_all_table_occurrences(source, "user");
+		assert_eq!(refs.len(), 2);
+		// First occurrence: DEFINE TABLE user — line 0
+		assert_eq!(refs[0].line, 0);
+		// Second occurrence: FROM user — line 1
+		assert_eq!(refs[1].line, 1);
+	}
+
+	#[test]
+	fn should_extract_word_at_cursor_on_table_name() {
+		let source = "SELECT * FROM user;";
+		// Cursor on 'u' of 'user' (col 14)
+		let word = word_at_position(
+			source,
+			Position {
+				line: 0,
+				character: 14,
+			},
+		);
+		assert_eq!(word, "user");
+	}
+
+	#[test]
+	fn should_extract_word_and_range_at_cursor() {
+		let source = "SELECT * FROM user;";
+		let (word, range) = word_and_range_at_position(
+			source,
+			Position {
+				line: 0,
+				character: 15,
+			},
+		);
+		assert_eq!(word, "user");
+		let range = range.unwrap();
+		assert_eq!(range.start.character, 14);
+		assert_eq!(range.end.character, 18);
+	}
+
+	#[test]
+	fn should_deduplicate_overlapping_matches() {
+		// A token like `user:tobie` could match both FROM and record-id patterns.
+		// Ensure deduplication by (line, col).
+		let source = "CREATE user:tobie SET name = 'Tobie';";
+		let refs = extract_all_table_occurrences(source, "user");
+		// CREATE user:tobie matches both CREATE keyword and record-id — deduped
+		let unique_positions: std::collections::HashSet<(u32, u32)> =
+			refs.iter().map(|r| (r.line, r.col)).collect();
+		assert_eq!(
+			refs.len(),
+			unique_positions.len(),
+			"duplicates found: {refs:?}"
+		);
+	}
+
+	#[test]
+	fn should_handle_from_only_modifier() {
+		let source = "DELETE ONLY user WHERE id = 1;";
+		let refs = extract_all_table_occurrences(source, "user");
+		assert_eq!(refs.len(), 1);
+		assert_eq!(refs[0].name, "user");
+	}
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// DOTENV LOADING
+// ═══════════════════════════════════════════════════════════════════════
+
+#[cfg(test)]
+mod dotenv_loading {
+	use crate::server::load_dotenv;
+	use tempfile::TempDir;
+
+	#[test]
+	fn should_extract_ns_and_db_from_env() {
+		let dir = TempDir::new().unwrap();
+		std::fs::write(
+			dir.path().join(".env"),
+			"SURREALDB_URL=ws://localhost:8000\nSURREALDB_NS=test_ns\nSURREALDB_DB=test_db\n",
+		)
+		.unwrap();
+		let result = load_dotenv(dir.path());
+		assert!(result.is_some());
+		let (url, ns, db) = result.unwrap();
+		assert_eq!(url, "ws://localhost:8000");
+		assert_eq!(ns, "test_ns");
+		assert_eq!(db, "test_db");
+	}
+
+	#[test]
+	fn should_accept_surreal_prefix_variant() {
+		let dir = TempDir::new().unwrap();
+		std::fs::write(
+			dir.path().join(".env"),
+			"SURREAL_NS=alt_ns\nSURREAL_DB=alt_db\n",
+		)
+		.unwrap();
+		let result = load_dotenv(dir.path());
+		assert!(result.is_some());
+		let (url, ns, db) = result.unwrap();
+		assert_eq!(url, "");
+		assert_eq!(ns, "alt_ns");
+		assert_eq!(db, "alt_db");
+	}
+
+	#[test]
+	fn should_return_none_when_ns_missing() {
+		let dir = TempDir::new().unwrap();
+		std::fs::write(
+			dir.path().join(".env"),
+			"SURREALDB_URL=ws://localhost:8000\nSURREALDB_DB=test_db\n",
+		)
+		.unwrap();
+		assert!(load_dotenv(dir.path()).is_none());
+	}
+
+	#[test]
+	fn should_return_none_when_db_missing() {
+		let dir = TempDir::new().unwrap();
+		std::fs::write(dir.path().join(".env"), "SURREALDB_NS=test_ns\n").unwrap();
+		assert!(load_dotenv(dir.path()).is_none());
+	}
+
+	#[test]
+	fn should_return_none_when_no_env_file() {
+		let dir = TempDir::new().unwrap();
+		assert!(load_dotenv(dir.path()).is_none());
+	}
+
+	#[test]
+	fn should_skip_comments_and_blank_lines() {
+		let dir = TempDir::new().unwrap();
+		std::fs::write(
+			dir.path().join(".env"),
+			"# Database config\n\nSURREALDB_NS=prod\n\n# DB name\nSURREALDB_DB=myapp\n",
+		)
+		.unwrap();
+		let result = load_dotenv(dir.path());
+		assert!(result.is_some());
+		let (_, ns, db) = result.unwrap();
+		assert_eq!(ns, "prod");
+		assert_eq!(db, "myapp");
+	}
+
+	#[test]
+	fn should_strip_quotes_from_values() {
+		let dir = TempDir::new().unwrap();
+		std::fs::write(
+			dir.path().join(".env"),
+			"SURREALDB_NS=\"quoted_ns\"\nSURREALDB_DB='quoted_db'\n",
+		)
+		.unwrap();
+		let result = load_dotenv(dir.path());
+		assert!(result.is_some());
+		let (_, ns, db) = result.unwrap();
+		assert_eq!(ns, "quoted_ns");
+		assert_eq!(db, "quoted_db");
+	}
+
+	#[test]
+	fn should_handle_whitespace_around_equals() {
+		let dir = TempDir::new().unwrap();
+		std::fs::write(
+			dir.path().join(".env"),
+			"SURREALDB_NS = spaced_ns \nSURREALDB_DB = spaced_db \n",
+		)
+		.unwrap();
+		let result = load_dotenv(dir.path());
+		assert!(result.is_some());
+		let (_, ns, db) = result.unwrap();
+		assert_eq!(ns, "spaced_ns");
+		assert_eq!(db, "spaced_db");
+	}
+
+	#[test]
+	fn should_ignore_unrelated_vars() {
+		let dir = TempDir::new().unwrap();
+		std::fs::write(
+			dir.path().join(".env"),
+			"DATABASE_URL=postgres://...\nSURREALDB_NS=ns1\nSURREALDB_DB=db1\nPORT=3000\n",
+		)
+		.unwrap();
+		let result = load_dotenv(dir.path());
+		assert!(result.is_some());
+		let (url, ns, db) = result.unwrap();
+		assert_eq!(url, "");
+		assert_eq!(ns, "ns1");
+		assert_eq!(db, "db1");
+	}
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// MONOREPO DETECTION
+// ═══════════════════════════════════════════════════════════════════════
+
+#[cfg(test)]
+mod monorepo_detection {
+	use crate::server::detect_monorepo_projects;
+	use tempfile::TempDir;
+
+	#[test]
+	fn should_detect_single_project_at_root() {
+		let dir = TempDir::new().unwrap();
+		std::fs::write(
+			dir.path().join("manifest.toml"),
+			"[meta]\nns = \"test\"\ndb = \"app\"\n",
+		)
+		.unwrap();
+		let projects = detect_monorepo_projects(dir.path());
+		assert_eq!(projects.len(), 1);
+		assert_eq!(projects[0], dir.path());
+	}
+
+	#[test]
+	fn should_detect_multiple_projects_in_subdirectories() {
+		let dir = TempDir::new().unwrap();
+		let auth_dir = dir.path().join("auth");
+		let billing_dir = dir.path().join("billing");
+		std::fs::create_dir_all(&auth_dir).unwrap();
+		std::fs::create_dir_all(&billing_dir).unwrap();
+		std::fs::write(
+			auth_dir.join("manifest.toml"),
+			"[meta]\nns = \"test\"\ndb = \"auth\"\n",
+		)
+		.unwrap();
+		std::fs::write(
+			billing_dir.join("manifest.toml"),
+			"[meta]\nns = \"test\"\ndb = \"billing\"\n",
+		)
+		.unwrap();
+		let projects = detect_monorepo_projects(dir.path());
+		assert_eq!(projects.len(), 2);
+	}
+
+	#[test]
+	fn should_detect_nested_projects_under_services() {
+		let dir = TempDir::new().unwrap();
+		let svc_auth = dir.path().join("services").join("auth");
+		let svc_billing = dir.path().join("services").join("billing");
+		std::fs::create_dir_all(&svc_auth).unwrap();
+		std::fs::create_dir_all(&svc_billing).unwrap();
+		std::fs::write(
+			svc_auth.join("manifest.toml"),
+			"[meta]\nns = \"test\"\ndb = \"auth\"\n",
+		)
+		.unwrap();
+		std::fs::write(
+			svc_billing.join("manifest.toml"),
+			"[meta]\nns = \"test\"\ndb = \"billing\"\n",
+		)
+		.unwrap();
+		let projects = detect_monorepo_projects(dir.path());
+		assert_eq!(projects.len(), 2);
+	}
+
+	#[test]
+	fn should_return_empty_for_no_markers() {
+		let dir = TempDir::new().unwrap();
+		let projects = detect_monorepo_projects(dir.path());
+		assert!(projects.is_empty());
+	}
+
+	#[test]
+	fn should_detect_env_based_project() {
+		let dir = TempDir::new().unwrap();
+		let sub = dir.path().join("api");
+		std::fs::create_dir_all(&sub).unwrap();
+		std::fs::write(sub.join(".env"), "SURREALDB_NS=test\nSURREALDB_DB=api\n").unwrap();
+		let projects = detect_monorepo_projects(dir.path());
+		assert_eq!(projects.len(), 1);
+		assert_eq!(projects[0], sub);
+	}
+
+	#[test]
+	fn should_skip_hidden_and_target_directories() {
+		let dir = TempDir::new().unwrap();
+		let hidden = dir.path().join(".hidden");
+		let target = dir.path().join("target");
+		std::fs::create_dir_all(&hidden).unwrap();
+		std::fs::create_dir_all(&target).unwrap();
+		std::fs::write(
+			hidden.join("manifest.toml"),
+			"[meta]\nns = \"test\"\ndb = \"hidden\"\n",
+		)
+		.unwrap();
+		std::fs::write(
+			target.join("manifest.toml"),
+			"[meta]\nns = \"test\"\ndb = \"target\"\n",
+		)
+		.unwrap();
+		let projects = detect_monorepo_projects(dir.path());
+		assert!(projects.is_empty());
+	}
+
+	#[test]
+	fn should_detect_surql_subdirectory_manifest() {
+		let dir = TempDir::new().unwrap();
+		let sub = dir.path().join("myproject");
+		std::fs::create_dir_all(sub.join("surql")).unwrap();
+		std::fs::write(
+			sub.join("surql").join("manifest.toml"),
+			"[meta]\nns = \"test\"\ndb = \"myproject\"\n",
+		)
+		.unwrap();
+		let projects = detect_monorepo_projects(dir.path());
+		assert_eq!(projects.len(), 1);
+		assert_eq!(projects[0], sub);
+	}
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// NESTED OBJECT FIELD HOVER
+// ═══════════════════════════════════════════════════════════════════════
+
+#[cfg(test)]
+mod nested_field_hover {
+	use crate::server::dotted_path_at_position;
+	use surql_parser::SchemaGraph;
+	use tower_lsp::lsp_types::Position;
+
+	fn pos(line: u32, col: u32) -> Position {
+		Position {
+			line,
+			character: col,
+		}
+	}
+
+	#[test]
+	fn should_extract_dotted_path_on_last_segment() {
+		//                 0123456789012345678901234567890
+		let source = "SELECT settings.theme FROM project";
+		let path = dotted_path_at_position(source, pos(0, 18));
+		assert_eq!(path, "settings.theme");
+	}
+
+	#[test]
+	fn should_extract_just_first_segment_when_cursor_on_it() {
+		//                 0123456789012345678901234567890
+		let source = "SELECT settings.theme FROM project";
+		let path = dotted_path_at_position(source, pos(0, 10));
+		assert_eq!(path, "settings");
+	}
+
+	#[test]
+	fn should_extract_triple_dotted_path() {
+		//                 0123456789012345678901234567890123456789
+		let source = "SELECT a.b.c FROM t";
+		let path = dotted_path_at_position(source, pos(0, 11));
+		assert_eq!(path, "a.b.c");
+	}
+
+	#[test]
+	fn should_extract_middle_of_triple_path() {
+		//                 0123456789012345678901234567890123456789
+		let source = "SELECT a.b.c FROM t";
+		let path = dotted_path_at_position(source, pos(0, 9));
+		assert_eq!(path, "a.b");
+	}
+
+	#[test]
+	fn should_extract_plain_word_without_dots() {
+		let source = "SELECT name FROM user";
+		let path = dotted_path_at_position(source, pos(0, 9));
+		assert_eq!(path, "name");
+	}
+
+	#[test]
+	fn should_resolve_nested_field_through_schema() {
+		let source = concat!(
+			"DEFINE TABLE project SCHEMAFULL;\n",
+			"DEFINE FIELD settings ON project TYPE object;\n",
+			"DEFINE FIELD settings.theme ON project TYPE string;\n",
+			"SELECT settings.theme FROM project;\n",
+		);
+		let schema = SchemaGraph::from_source(source).unwrap();
+		// Cursor on "theme" in "settings.theme" on the SELECT line (line 3)
+		let dotted = dotted_path_at_position(source, pos(3, 18));
+		assert_eq!(dotted, "settings.theme");
+
+		let field = schema.field_on("project", &dotted);
+		assert!(
+			field.is_some(),
+			"settings.theme should be a field on project"
+		);
+		assert_eq!(field.unwrap().kind.as_deref(), Some("string"));
+	}
+
+	#[test]
+	fn should_not_resolve_nonexistent_nested_field() {
+		let source = concat!(
+			"DEFINE TABLE project SCHEMAFULL;\n",
+			"DEFINE FIELD settings ON project TYPE object;\n",
+		);
+		let schema = SchemaGraph::from_source(source).unwrap();
+		let field = schema.field_on("project", "settings.nonexistent");
+		assert!(field.is_none());
+	}
+
+	#[test]
+	fn should_handle_empty_source() {
+		let path = dotted_path_at_position("", pos(0, 0));
+		assert_eq!(path, "");
+	}
+
+	#[test]
+	fn should_handle_cursor_on_dot_itself() {
+		//                 0123456789012345
+		let source = "SELECT a.b FROM t";
+		// pos(0, 8) is on the '.' character - should return empty since dot isn't an ident
+		let path = dotted_path_at_position(source, pos(0, 8));
+		assert_eq!(path, "");
+	}
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// GRAPH PATH HOVER
+// ═══════════════════════════════════════════════════════════════════════
+
+#[cfg(test)]
+mod graph_path_hover {
+	use crate::server::{GraphContext, graph_context_at_position};
+	use surql_parser::SchemaGraph;
+	use tower_lsp::lsp_types::Position;
+
+	fn pos(line: u32, col: u32) -> Position {
+		Position {
+			line,
+			character: col,
+		}
+	}
+
+	#[test]
+	fn should_detect_edge_table_between_arrows() {
+		//                 0         1         2         3
+		//                 0123456789012345678901234567890123456789
+		let source = "SELECT ->manages->project FROM user";
+		// "manages" starts at col 9, ends at col 16, followed by ->
+		let ctx = graph_context_at_position(source, pos(0, 12));
+		assert_eq!(ctx, Some(GraphContext::EdgeTable("manages".to_string())));
+	}
+
+	#[test]
+	fn should_detect_target_table_after_last_arrow() {
+		//                 0         1         2         3
+		//                 0123456789012345678901234567890123456789
+		let source = "SELECT ->manages->project FROM user";
+		// "project" starts at col 19
+		let ctx = graph_context_at_position(source, pos(0, 22));
+		assert_eq!(ctx, Some(GraphContext::TargetTable("project".to_string())));
+	}
+
+	#[test]
+	fn should_detect_field_on_target_table() {
+		//                 0         1         2         3
+		//                 0123456789012345678901234567890123456789012
+		let source = "SELECT ->manages->project.name FROM user";
+		// "name" starts at col 26
+		let ctx = graph_context_at_position(source, pos(0, 28));
+		assert_eq!(
+			ctx,
+			Some(GraphContext::FieldOnTarget {
+				table: "project".to_string(),
+				field: "name".to_string(),
+			})
+		);
+	}
+
+	#[test]
+	fn should_detect_reverse_edge_table() {
+		//                 0123456789012345678901234567890
+		let source = "SELECT <-likes<-user FROM post";
+		// "likes" starts at col 9
+		let ctx = graph_context_at_position(source, pos(0, 11));
+		assert_eq!(ctx, Some(GraphContext::EdgeTable("likes".to_string())));
+	}
+
+	#[test]
+	fn should_detect_reverse_target_table() {
+		//                 0123456789012345678901234567890
+		let source = "SELECT <-likes<-user FROM post";
+		// "user" starts at col 16
+		let ctx = graph_context_at_position(source, pos(0, 18));
+		assert_eq!(ctx, Some(GraphContext::TargetTable("user".to_string())));
+	}
+
+	#[test]
+	fn should_return_none_for_normal_word() {
+		let source = "SELECT name FROM user";
+		let ctx = graph_context_at_position(source, pos(0, 9));
+		assert!(ctx.is_none());
+	}
+
+	#[test]
+	fn should_resolve_edge_table_in_schema() {
+		let source = concat!(
+			"DEFINE TABLE manages SCHEMAFULL;\n",
+			"DEFINE FIELD in ON manages TYPE record<user>;\n",
+			"DEFINE FIELD out ON manages TYPE record<project>;\n",
+		);
+		let schema = SchemaGraph::from_source(source).unwrap();
+		assert!(
+			schema.table("manages").is_some(),
+			"edge table 'manages' should be in schema"
+		);
+	}
+
+	#[test]
+	fn should_resolve_field_on_graph_target_in_schema() {
+		let source = concat!(
+			"DEFINE TABLE project SCHEMAFULL;\n",
+			"DEFINE FIELD name ON project TYPE string;\n",
+			"DEFINE TABLE manages SCHEMAFULL;\n",
+		);
+		let schema = SchemaGraph::from_source(source).unwrap();
+		let field = schema.field_on("project", "name");
+		assert!(field.is_some());
+		assert_eq!(field.unwrap().kind.as_deref(), Some("string"));
+	}
+
+	#[test]
+	fn should_return_none_for_empty_source() {
+		let ctx = graph_context_at_position("", pos(0, 0));
+		assert!(ctx.is_none());
+	}
+
+	#[test]
+	fn should_not_detect_minus_sign_as_arrow() {
+		let source = "SELECT a - b FROM t";
+		let ctx = graph_context_at_position(source, pos(0, 12));
+		assert!(ctx.is_none());
 	}
 }

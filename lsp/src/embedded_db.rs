@@ -11,15 +11,16 @@ use surrealdb::{Surreal, engine::local::Mem};
 use std::path::Path;
 
 #[cfg(feature = "embedded-db")]
-use std::collections::hash_map::DefaultHasher;
-#[cfg(feature = "embedded-db")]
-use std::hash::{Hash, Hasher};
-
-#[cfg(feature = "embedded-db")]
 pub fn content_hash(content: &str) -> String {
-	let mut hasher = DefaultHasher::new();
-	content.hash(&mut hasher);
-	format!("{:016x}", hasher.finish())
+	// FNV-1a 64-bit — deterministic across Rust versions and platforms
+	const FNV_OFFSET: u64 = 0xcbf29ce484222325;
+	const FNV_PRIME: u64 = 0x00000100000001B3;
+	let mut hash = FNV_OFFSET;
+	for byte in content.as_bytes() {
+		hash ^= *byte as u64;
+		hash = hash.wrapping_mul(FNV_PRIME);
+	}
+	format!("{:016x}", hash)
 }
 
 /// Dual embedded SurrealDB: workspace for user schema, meta for LSP state.
@@ -80,7 +81,7 @@ impl DualEngine {
 	/// consistent schema state.
 	pub async fn apply_migrations(&self, dir: &Path) -> anyhow::Result<MigrationResult> {
 		let mut surql_files = Vec::new();
-		collect_surql_files(dir, &mut surql_files);
+		surql_parser::collect_surql_files(dir, &mut surql_files);
 		surql_files.sort();
 
 		let mut any_changed = false;
@@ -270,32 +271,6 @@ impl DualEngine {
 			.await
 		{
 			tracing::warn!("Failed to update meta_db for {path}: {e}");
-		}
-	}
-}
-
-/// Recursively collect all .surql files from a directory tree.
-/// Skips known large/irrelevant directories to prevent memory blowup.
-#[cfg(feature = "embedded-db")]
-fn collect_surql_files(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
-	let entries = match std::fs::read_dir(dir) {
-		Ok(e) => e,
-		Err(_) => return,
-	};
-	for entry in entries.filter_map(|e| e.ok()) {
-		let path = entry.path();
-		if path.is_dir() {
-			let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-			if matches!(
-				name,
-				"target" | "node_modules" | ".git" | "build" | "fixtures" | "dist" | ".cache"
-			) || name.starts_with('.')
-			{
-				continue;
-			}
-			collect_surql_files(&path, out);
-		} else if path.extension().is_some_and(|ext| ext == "surql") {
-			out.push(path);
 		}
 	}
 }

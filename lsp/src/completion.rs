@@ -28,22 +28,34 @@ pub fn complete(
 	position: Position,
 	schema: Option<&SchemaGraph>,
 ) -> Vec<CompletionItem> {
+	// Check if cursor is in a surql-allow comment
+	if let Some(suppress_items) = suppress_completions(source, position) {
+		return suppress_items;
+	}
+
 	let mut items = Vec::new();
 	let context = detect_context(source, position);
 
 	match context {
 		Context::TableName => {
+			// Tables first (higher priority in FROM/INTO/ON context)
 			if let Some(sg) = schema {
 				for name in sg.table_names() {
 					items.push(CompletionItem {
 						label: name.to_string(),
 						kind: Some(CompletionItemKind::CLASS),
 						detail: Some("table".into()),
+						sort_text: Some(format!("0_{name}")),
 						..Default::default()
 					});
 				}
 			}
-			items.extend(keyword_completions());
+			// Keywords after tables
+			for kw in keyword_completions() {
+				let mut item = kw.clone();
+				item.sort_text = Some(format!("1_{}", kw.label));
+				items.push(item);
+			}
 		}
 		Context::FieldName(ref table) => {
 			if let Some(sg) = schema {
@@ -184,7 +196,7 @@ pub fn complete(
 			}
 		}
 		Context::General => {
-			items.extend(keyword_completions());
+			items.extend(keyword_completions().iter().cloned());
 			if let Some(sg) = schema {
 				for name in sg.table_names() {
 					items.push(CompletionItem {
@@ -244,15 +256,30 @@ fn builtin_snippet(
 	format!("{short_name}($0)")
 }
 
-fn keyword_completions() -> Vec<CompletionItem> {
-	keywords::all_keywords()
-		.iter()
-		.map(|kw| CompletionItem {
-			label: kw.to_string(),
-			kind: Some(CompletionItemKind::KEYWORD),
-			..Default::default()
-		})
-		.collect()
+fn keyword_completions() -> &'static [CompletionItem] {
+	use std::sync::LazyLock;
+	static COMPLETIONS: LazyLock<Vec<CompletionItem>> = LazyLock::new(|| {
+		keywords::all_keywords()
+			.iter()
+			.map(|kw| {
+				let needs_space = !matches!(
+					*kw,
+					";" | ")" | "]" | "}" | "," | "." | "NONE" | "NULL" | "TRUE" | "FALSE"
+				);
+				CompletionItem {
+					label: kw.to_string(),
+					kind: Some(CompletionItemKind::KEYWORD),
+					insert_text: if needs_space {
+						Some(format!("{kw} "))
+					} else {
+						None
+					},
+					..Default::default()
+				}
+			})
+			.collect()
+	});
+	&COMPLETIONS
 }
 
 /// Detect the completion context using the lexer's token stream.
@@ -358,14 +385,63 @@ pub(crate) fn detect_context(source: &str, position: Position) -> Context {
 	Context::General
 }
 
-/// Convert an LSP Position (0-indexed line/col) to a byte offset.
+/// Convert an LSP Position (0-indexed line, UTF-16 code unit column) to a byte offset.
+///
+/// Uses `split('\n')` instead of `lines()` to correctly handle CRLF (`\r\n`) line
+/// endings. `lines()` strips both `\r\n` and `\n` but only advances by `+1`, which
+/// produces incorrect offsets for CRLF sources.
 pub(crate) fn position_to_byte_offset(source: &str, position: Position) -> usize {
 	let mut offset = 0;
-	for (i, line) in source.lines().enumerate() {
+	for (i, line) in source.split('\n').enumerate() {
 		if i == position.line as usize {
-			return offset + (position.character as usize).min(line.len());
+			let clean_line = line.strip_suffix('\r').unwrap_or(line);
+			let mut utf16_count = 0u32;
+			for (byte_idx, ch) in clean_line.char_indices() {
+				if utf16_count >= position.character {
+					return offset + byte_idx;
+				}
+				utf16_count += ch.len_utf16() as u32;
+			}
+			return offset + clean_line.len();
 		}
-		offset += line.len() + 1; // +1 for \n
+		offset += line.len() + 1; // line includes \r if CRLF, +1 for \n
 	}
 	source.len()
+}
+
+/// Offer suppress code completions when cursor is inside a `-- surql-allow:` or `// surql-allow:` comment.
+fn suppress_completions(source: &str, position: Position) -> Option<Vec<CompletionItem>> {
+	let line = source.lines().nth(position.line as usize)?;
+
+	// Check if the line contains a surql-allow: directive.
+	// Using the whole line avoids byte-slicing at a UTF-16 position boundary
+	// which could panic on multi-byte characters.
+	let is_suppress = line.contains("surql-allow:");
+
+	if !is_suppress {
+		return None;
+	}
+
+	let codes = [
+		(
+			"undefined-table",
+			"Suppress warning for tables not defined in workspace",
+		),
+		(
+			"undefined-record-link",
+			"Suppress warning for undefined record link targets",
+		),
+	];
+
+	Some(
+		codes
+			.iter()
+			.map(|(code, desc)| CompletionItem {
+				label: code.to_string(),
+				kind: Some(CompletionItemKind::VALUE),
+				detail: Some(desc.to_string()),
+				..Default::default()
+			})
+			.collect(),
+	)
 }

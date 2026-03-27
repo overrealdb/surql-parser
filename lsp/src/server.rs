@@ -1,10 +1,12 @@
 //! LSP Backend — implements the Language Server Protocol for SurrealQL.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::RwLock;
+use std::sync::Arc;
 
 use dashmap::DashMap;
 use surql_parser::SchemaGraph;
+use tokio::sync::RwLock;
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer};
@@ -16,6 +18,14 @@ use crate::diagnostics;
 use crate::document::DocumentStore;
 use crate::embedded;
 use crate::formatting;
+use crate::manifest::{detect_overshift_manifest, write_file_manifest};
+
+// Re-export moved functions for backward compatibility (used by tests)
+pub(crate) use crate::dotenv::{detect_monorepo_projects, load_dotenv};
+pub(crate) use crate::hover::{
+	GraphContext, dotted_path_at_position, format_function_hover, format_nested_field_hover,
+	format_table_hover, graph_context_at_position, keyword_documentation, type_documentation,
+};
 use crate::signature;
 
 /// Semantic token types for SurrealQL highlighting in embedded contexts.
@@ -33,13 +43,15 @@ const SEMANTIC_TOKEN_TYPES: &[SemanticTokenType] = &[
 pub struct Backend {
 	client: Client,
 	documents: DocumentStore,
-	schema: RwLock<SchemaGraph>,
+	schema: RwLock<Arc<SchemaGraph>>,
 	document_schemas: DashMap<Url, SchemaGraph>,
+	file_schemas: RwLock<HashMap<PathBuf, SchemaGraph>>,
 	workspace_root: RwLock<Option<PathBuf>>,
 	manifest_scope: RwLock<Option<(String, String)>>,
-	format_enabled: bool,
+	dotenv_scope: RwLock<Option<(String, String)>>,
+	format_config: RwLock<formatting::FormatConfig>,
 	#[cfg(feature = "embedded-db")]
-	embedded: tokio::sync::RwLock<Option<crate::embedded_db::DualEngine>>,
+	embedded: RwLock<Option<crate::embedded_db::DualEngine>>,
 }
 
 impl Backend {
@@ -47,46 +59,120 @@ impl Backend {
 		Self {
 			client,
 			documents: DocumentStore::new(),
-			schema: RwLock::new(SchemaGraph::default()),
+			schema: RwLock::new(Arc::new(SchemaGraph::default())),
 			document_schemas: DashMap::new(),
+			file_schemas: RwLock::new(HashMap::new()),
 			workspace_root: RwLock::new(None),
 			manifest_scope: RwLock::new(None),
-			format_enabled: true,
+			dotenv_scope: RwLock::new(None),
+			format_config: RwLock::new(formatting::FormatConfig::default()),
 			#[cfg(feature = "embedded-db")]
-			embedded: tokio::sync::RwLock::new(None),
+			embedded: RwLock::new(None),
 		}
 	}
 
-	/// Rebuild the workspace schema graph from all .surql files.
-	/// Also writes `surql-lsp-out/files.json` manifest for the Zed extension.
-	fn rebuild_schema(&self) {
-		let root = match self.workspace_root.read() {
-			Ok(r) => r.clone(),
-			Err(e) => {
-				tracing::error!("workspace_root lock poisoned: {e}");
-				return;
-			}
-		};
+	/// Full rebuild: scan all .surql files, populate per-file cache, merge into
+	/// workspace schema. Called once on `initialized`.
+	///
+	/// Filesystem I/O runs on a blocking thread via `spawn_blocking` to avoid
+	/// stalling the async runtime. Shows progress in the editor status bar.
+	async fn rebuild_schema(&self) {
+		let root = self.workspace_root.read().await.clone();
 		if let Some(root) = root {
-			match SchemaGraph::from_files(&root) {
-				Ok(sg) => {
-					write_file_manifest(&root, &sg);
-					match self.schema.write() {
-						Ok(mut schema) => {
-							tracing::info!(
-								"Schema rebuilt: {} tables, {} functions from {}",
-								sg.table_names().count(),
-								sg.function_names().count(),
-								root.display()
-							);
-							*schema = sg;
+			let token = NumberOrString::String("surql-schema-rebuild".into());
+			let _ = self
+				.client
+				.send_request::<request::WorkDoneProgressCreate>(WorkDoneProgressCreateParams {
+					token: token.clone(),
+				})
+				.await;
+
+			self.client
+				.send_notification::<notification::Progress>(ProgressParams {
+					token: token.clone(),
+					value: ProgressParamsValue::WorkDone(WorkDoneProgress::Begin(
+						WorkDoneProgressBegin {
+							title: "SurrealQL".into(),
+							message: Some("Scanning .surql files...".into()),
+							cancellable: Some(false),
+							percentage: Some(0),
+						},
+					)),
+				})
+				.await;
+
+			let build_result = tokio::task::spawn_blocking(move || {
+				let per_file = SchemaGraph::from_files_per_file(&root);
+				(root, per_file)
+			})
+			.await;
+
+			let (root, per_file_result) = match build_result {
+				Ok(pair) => pair,
+				Err(e) => {
+					tracing::error!("rebuild_schema spawn_blocking panicked: {e}");
+					self.send_progress_end(&token, "Schema build failed").await;
+					return;
+				}
+			};
+			match per_file_result {
+				Ok(per_file) => {
+					*self.file_schemas.write().await = per_file;
+					let merged = self.merge_file_schemas().await;
+					let table_count = merged.table_names().count();
+					let fn_count = merged.function_names().count();
+					tracing::info!(
+						"Schema rebuilt: {} tables, {} functions from {}",
+						table_count,
+						fn_count,
+						root.display()
+					);
+
+					self.client
+						.send_notification::<notification::Progress>(ProgressParams {
+							token: token.clone(),
+							value: ProgressParamsValue::WorkDone(WorkDoneProgress::Report(
+								WorkDoneProgressReport {
+									message: Some(format!(
+										"Building manifest ({table_count} tables, {fn_count} functions)..."
+									)),
+									cancellable: Some(false),
+									percentage: Some(70),
+								},
+							)),
+						})
+						.await;
+
+					let manifest_schema = Arc::new(merged);
+					let manifest_root = root.clone();
+					let manifest_ref = Arc::clone(&manifest_schema);
+					let manifest_handle = tokio::task::spawn_blocking(move || {
+						write_file_manifest(&manifest_root, &manifest_ref);
+					});
+					tokio::spawn(async move {
+						if let Err(e) = manifest_handle.await {
+							tracing::error!("write_file_manifest panicked: {e}");
 						}
-						Err(e) => tracing::error!("schema lock poisoned: {e}"),
-					}
+					});
+
+					self.send_progress_end(
+						&token,
+						&format!("{table_count} tables, {fn_count} functions"),
+					)
+					.await;
 				}
 				Err(e) => {
 					tracing::warn!("Failed to rebuild schema: {e}");
-					write_file_manifest(&root, &SchemaGraph::default());
+					let manifest_root = root.clone();
+					let manifest_handle = tokio::task::spawn_blocking(move || {
+						write_file_manifest(&manifest_root, &SchemaGraph::default());
+					});
+					tokio::spawn(async move {
+						if let Err(e) = manifest_handle.await {
+							tracing::error!("write_file_manifest panicked: {e}");
+						}
+					});
+					self.send_progress_end(&token, "Schema build failed").await;
 				}
 			}
 		} else {
@@ -94,45 +180,124 @@ impl Backend {
 		}
 	}
 
+	/// Incrementally rebuild the schema for a single file that changed.
+	///
+	/// Re-parses only `path`, updates the per-file cache, then re-merges all
+	/// cached schemas. O(1) parse + O(n) merge where n = file count (merge is
+	/// cheap HashMap extends, no I/O or parsing).
+	async fn rebuild_file_schema(&self, path: PathBuf) {
+		let file_path = path.clone();
+		let build_result =
+			tokio::task::spawn_blocking(move || SchemaGraph::from_single_file(&file_path)).await;
+
+		match build_result {
+			Ok(Some(graph)) => {
+				self.file_schemas.write().await.insert(path, graph);
+			}
+			Ok(None) => {
+				// File unreadable/unparsable — remove stale entry
+				self.file_schemas.write().await.remove(&path);
+			}
+			Err(e) => {
+				tracing::error!("rebuild_file_schema spawn_blocking panicked: {e}");
+				return;
+			}
+		}
+
+		let merged = self.merge_file_schemas().await;
+
+		// Write manifest in the background
+		if let Some(root) = self.workspace_root.read().await.clone() {
+			let manifest_schema = Arc::new(merged);
+			let manifest_ref = Arc::clone(&manifest_schema);
+			let manifest_handle = tokio::task::spawn_blocking(move || {
+				write_file_manifest(&root, &manifest_ref);
+			});
+			tokio::spawn(async move {
+				if let Err(e) = manifest_handle.await {
+					tracing::error!("write_file_manifest panicked: {e}");
+				}
+			});
+		}
+	}
+
+	/// Merge all per-file schemas into the workspace-level schema.
+	///
+	/// Returns a clone of the merged schema for callers that need it (e.g.
+	/// to write the manifest). The merged schema is also stored in `self.schema`.
+	async fn merge_file_schemas(&self) -> SchemaGraph {
+		let file_schemas = self.file_schemas.read().await;
+		let mut merged = SchemaGraph::default();
+		for sg in file_schemas.values() {
+			merged.merge(sg.clone());
+		}
+		let schema_arc = Arc::new(merged.clone());
+		drop(file_schemas);
+		*self.schema.write().await = schema_arc;
+		merged
+	}
+
+	async fn send_progress_end(&self, token: &NumberOrString, message: &str) {
+		self.client
+			.send_notification::<notification::Progress>(ProgressParams {
+				token: token.clone(),
+				value: ProgressParamsValue::WorkDone(WorkDoneProgress::End(WorkDoneProgressEnd {
+					message: Some(message.into()),
+				})),
+			})
+			.await;
+	}
+
 	/// Get the effective schema for a document: workspace schema + document overlay.
 	/// Applies NS/DB scope filtering based on the current document's context.
-	fn effective_schema(&self, uri: &Url) -> SchemaGraph {
-		let full_schema = match self.schema.read() {
-			Ok(s) => s.clone(),
-			Err(e) => {
-				tracing::error!("schema lock poisoned in effective_schema: {e}");
-				SchemaGraph::default()
-			}
-		};
+	///
+	/// Clones the `Arc<SchemaGraph>` (cheap ref-count bump). Real cloning only
+	/// happens when scoping or merging is needed.
+	async fn effective_schema(&self, uri: &Url) -> SchemaGraph {
+		let schema_arc = Arc::clone(&*self.schema.read().await);
 
 		// Determine current file's NS/DB scope:
 		// 1. From USE statement in the file (document schema)
 		// 2. From manifest.toml (overshift project)
-		// 3. Default (None, None) = see all unscoped tables
-		let (file_ns, file_db) = self
-			.document_schemas
-			.get(uri)
-			.and_then(|ds| {
-				ds.table_names()
-					.next()
-					.and_then(|tn| ds.table(tn))
-					.and_then(|t| {
-						if t.ns.is_some() || t.db.is_some() {
-							Some((t.ns.clone(), t.db.clone()))
-						} else {
-							None
-						}
-					})
-			})
-			.or_else(|| {
-				self.manifest_scope.read().ok().and_then(|ms| {
-					ms.as_ref()
-						.map(|(ns, db)| (Some(ns.clone()), Some(db.clone())))
+		// 3. From .env file (SURREALDB_NS / SURREALDB_DB)
+		// 4. Default (None, None) = see all unscoped tables
+		let from_doc = self.document_schemas.get(uri).and_then(|ds| {
+			ds.table_names()
+				.next()
+				.and_then(|tn| ds.table(tn))
+				.and_then(|t| {
+					if t.ns.is_some() || t.db.is_some() {
+						Some((t.ns.clone(), t.db.clone()))
+					} else {
+						None
+					}
 				})
-			})
-			.unwrap_or((None, None));
+		});
+		let (file_ns, file_db) = match from_doc {
+			Some(scope) => scope,
+			None => {
+				let manifest = self.manifest_scope.read().await;
+				if let Some((ns, db)) = manifest.as_ref() {
+					(Some(ns.clone()), Some(db.clone()))
+				} else {
+					let dotenv = self.dotenv_scope.read().await;
+					dotenv
+						.as_ref()
+						.map(|(ns, db)| (Some(ns.clone()), Some(db.clone())))
+						.unwrap_or((None, None))
+				}
+			}
+		};
 
-		let mut schema = full_schema.scoped(file_ns.as_deref(), file_db.as_deref());
+		let needs_scope = file_ns.is_some() || file_db.is_some();
+		let has_doc_schema = self.document_schemas.get(uri).is_some();
+
+		if !needs_scope && !has_doc_schema {
+			// Fast path: no scoping or merging needed, return owned clone via Arc
+			return (*schema_arc).clone();
+		}
+
+		let mut schema = schema_arc.scoped(file_ns.as_deref(), file_db.as_deref());
 
 		if let Some(doc_schema) = self.document_schemas.get(uri) {
 			schema.merge(doc_schema.clone());
@@ -166,6 +331,44 @@ impl Backend {
 		uri.path().ends_with(".rs")
 	}
 
+	/// Collect all .surql files in the workspace: open documents merged with
+	/// files on disk. Open documents take priority (unsaved changes).
+	async fn collect_workspace_surql_files(&self) -> Vec<(Url, String)> {
+		let mut file_map: std::collections::HashMap<Url, String> = std::collections::HashMap::new();
+
+		// Start with all open .surql documents
+		for (doc_uri, doc_source) in self.documents.all() {
+			if doc_uri.path().ends_with(".surql") {
+				file_map.insert(doc_uri, doc_source);
+			}
+		}
+
+		// Add workspace files from disk that aren't already open
+		if let Some(root) = self.workspace_root.read().await.clone() {
+			let disk_files = tokio::task::spawn_blocking(move || {
+				let mut paths = Vec::new();
+				surql_parser::collect_surql_files(&root, &mut paths);
+				let mut result = Vec::new();
+				for path in paths {
+					if let Ok(uri) = Url::from_file_path(&path)
+						&& let Ok(content) = std::fs::read_to_string(&path)
+					{
+						result.push((uri, content));
+					}
+				}
+				result
+			})
+			.await
+			.unwrap_or_default();
+
+			for (uri, content) in disk_files {
+				file_map.entry(uri).or_insert(content);
+			}
+		}
+
+		file_map.into_iter().collect()
+	}
+
 	async fn publish_diagnostics(&self, uri: Url) {
 		if let Some(source) = self.documents.get(&uri) {
 			if Self::is_rust_file(&uri) {
@@ -193,11 +396,13 @@ impl Backend {
 			let mut all_diagnostics = result.diagnostics;
 
 			// Schema-aware diagnostics
-			let schema = self.effective_schema(&uri);
+			let schema = self.effective_schema(&uri).await;
 			if schema.table_names().count() > 0 {
 				// Warn about undefined table references in DML
 				for table_ref in context::extract_table_references(&source) {
-					if schema.table(&table_ref.name).is_none() {
+					if schema.table(&table_ref.name).is_none()
+						&& !line_has_suppress(&source, table_ref.line, "undefined-table")
+					{
 						all_diagnostics.push(Diagnostic {
 							range: Range {
 								start: Position {
@@ -221,12 +426,20 @@ impl Backend {
 				}
 
 				// Cross-file: warn about record links to undefined tables
+				// Use raw workspace schema (not scoped) to avoid false positives
+				let ws_schema = self.schema.read().await;
 				if let Some(doc_schema) = self.document_schemas.get(&uri) {
 					for table_name in doc_schema.table_names() {
 						for field in doc_schema.fields_of(table_name) {
 							for link in &field.record_links {
-								if schema.table(link).is_none() {
-									let range = find_record_link_range(&source, link);
+								if ws_schema.table(link).is_none()
+									&& schema.table(link).is_none()
+									&& let Some(range) = find_record_link_range(&source, link)
+									&& !line_has_suppress(
+										&source,
+										range.start.line,
+										"undefined-table",
+									) {
 									all_diagnostics.push(Diagnostic {
 										range,
 										severity: Some(DiagnosticSeverity::WARNING),
@@ -263,7 +476,11 @@ impl Backend {
 				std::panic::catch_unwind(move || surql_parser::parse_for_diagnostics(&content));
 			let diags = match parse_result {
 				Ok(Err(diags)) => diags,
-				_ => continue,
+				Ok(Ok(_)) => continue,
+				Err(e) => {
+					tracing::error!("Lexer panicked during Rust diagnostics: {e:?}");
+					continue;
+				}
 			};
 			for d in diags {
 				diagnostics.push(Diagnostic {
@@ -306,10 +523,13 @@ impl LanguageServer for Backend {
 		// so the Zed extension can discover .surql files via slash commands
 		if let Some(root) = params.root_uri
 			&& let Ok(path) = root.to_file_path()
-			&& let Ok(mut wr) = self.workspace_root.write()
 		{
-			write_file_manifest(&path, &SchemaGraph::default());
-			*wr = Some(path);
+			let manifest_path = path.clone();
+			tokio::task::spawn_blocking(move || {
+				write_file_manifest(&manifest_path, &SchemaGraph::default());
+			});
+			*self.format_config.write().await = formatting::load_config_from_workspace(&path);
+			*self.workspace_root.write().await = Some(path);
 		}
 
 		Ok(InitializeResult {
@@ -331,6 +551,13 @@ impl LanguageServer for Backend {
 					..Default::default()
 				}),
 				document_symbol_provider: Some(OneOf::Left(true)),
+				code_action_provider: Some(CodeActionProviderCapability::Simple(true)),
+				rename_provider: Some(OneOf::Right(RenameOptions {
+					prepare_provider: Some(true),
+					work_done_progress_options: WorkDoneProgressOptions {
+						work_done_progress: None,
+					},
+				})),
 				code_lens_provider: Some(CodeLensOptions {
 					resolve_provider: Some(false),
 				}),
@@ -357,19 +584,53 @@ impl LanguageServer for Backend {
 		tracing::info!("SurrealQL LSP initialized");
 
 		// Auto-detect overshift manifest.toml for NS/DB context
-		if let Ok(root) = self.workspace_root.read()
-			&& let Some(root) = root.as_ref()
-			&& let Some(scope) = detect_overshift_manifest(root)
-			&& let Ok(mut ms) = self.manifest_scope.write()
 		{
-			*ms = Some(scope);
+			let root = self.workspace_root.read().await;
+			if let Some(root) = root.as_ref() {
+				if let Some(scope) = detect_overshift_manifest(root) {
+					*self.manifest_scope.write().await = Some(scope);
+				}
+
+				if let Some((_url, ns, db)) = load_dotenv(root) {
+					tracing::info!("Loaded .env scope: NS={ns}, DB={db}");
+					*self.dotenv_scope.write().await = Some((ns, db));
+				}
+
+				let monorepo_roots = detect_monorepo_projects(root);
+				if monorepo_roots.len() > 1 {
+					let listing = monorepo_roots
+						.iter()
+						.filter_map(|p| p.strip_prefix(root).ok())
+						.map(|p| p.display().to_string())
+						.collect::<Vec<_>>()
+						.join(", ");
+					tracing::warn!(
+						"Multiple SurrealDB projects detected: {listing}. \
+						 Open each as a workspace for best results."
+					);
+					self.client
+						.show_message(
+							MessageType::WARNING,
+							format!(
+								"Multiple SurrealDB projects detected: {listing}. \
+								 Open each as a separate workspace for best results."
+							),
+						)
+						.await;
+				}
+			}
 		}
 
-		self.rebuild_schema();
+		self.rebuild_schema().await;
+
+		// Re-publish diagnostics for all open docs now that schema is built
+		for doc_uri in self.documents.all_uris() {
+			self.publish_diagnostics(doc_uri).await;
+		}
 
 		#[cfg(feature = "embedded-db")]
 		{
-			let workspace_path = self.workspace_root.read().ok().and_then(|r| r.clone());
+			let workspace_path = self.workspace_root.read().await.clone();
 			match crate::embedded_db::DualEngine::start().await {
 				Ok(engine) => {
 					if let Some(root) = workspace_path
@@ -403,13 +664,17 @@ impl LanguageServer for Backend {
 	}
 
 	async fn did_save(&self, params: DidSaveTextDocumentParams) {
-		// Rebuild schema on save (any .surql file might have changed)
-		self.rebuild_schema();
+		let uri = params.text_document.uri.clone();
+		if let Ok(path) = uri.to_file_path()
+			&& path.extension().is_some_and(|ext| ext == "surql")
+		{
+			self.rebuild_file_schema(path).await;
+		}
 
 		#[cfg(feature = "embedded-db")]
 		{
 			if let Some(ref engine) = *self.embedded.read().await {
-				let workspace_path = self.workspace_root.read().ok().and_then(|r| r.clone());
+				let workspace_path = self.workspace_root.read().await.clone();
 				if let Some(root) = workspace_path
 					&& let Err(e) = engine.apply_migrations(&root).await
 				{
@@ -418,7 +683,11 @@ impl LanguageServer for Backend {
 			}
 		}
 
-		self.publish_diagnostics(params.text_document.uri).await;
+		// Re-publish diagnostics for ALL open documents, not just the saved one,
+		// because schema changes in one file can affect diagnostics in other files.
+		for doc_uri in self.documents.all_uris() {
+			self.publish_diagnostics(doc_uri).await;
+		}
 	}
 
 	async fn formatting(&self, params: DocumentFormattingParams) -> Result<Option<Vec<TextEdit>>> {
@@ -427,7 +696,8 @@ impl LanguageServer for Backend {
 			Some(s) => s,
 			None => return Ok(None),
 		};
-		Ok(formatting::format_document(&source, self.format_enabled))
+		let config = self.format_config.read().await.clone();
+		Ok(formatting::format_document(&source, &config))
 	}
 
 	async fn completion(&self, params: CompletionParams) -> Result<Option<CompletionResponse>> {
@@ -437,7 +707,7 @@ impl LanguageServer for Backend {
 			Some(s) => s,
 			None => return Ok(None),
 		};
-		let schema = self.effective_schema(uri);
+		let schema = self.effective_schema(uri).await;
 		let items = completion::complete(&source, position, Some(&schema));
 		Ok(Some(CompletionResponse::Array(items)))
 	}
@@ -454,7 +724,7 @@ impl LanguageServer for Backend {
 		if Self::is_rust_file(uri) {
 			let regions = embedded::extract_surql_from_rust(&source);
 			let byte_off = position_to_byte_offset(&source, position);
-			let schema = self.effective_schema(uri);
+			let schema = self.effective_schema(uri).await;
 			for region in &regions {
 				let region_end = region.offset + region.content.len();
 				if byte_off >= region.offset && byte_off <= region_end {
@@ -536,7 +806,7 @@ impl LanguageServer for Backend {
 			return Ok(None);
 		}
 
-		let schema = self.effective_schema(uri);
+		let schema = self.effective_schema(uri).await;
 
 		// Find the word at cursor
 		let (word, word_range) = word_and_range_at_position(&source, position);
@@ -597,6 +867,54 @@ impl LanguageServer for Backend {
 				}),
 				range: word_range,
 			}));
+		}
+
+		// Graph path hover: ->edge->, ->target, ->target.field
+		if let Some(ctx) = graph_context_at_position(&source, position) {
+			match ctx {
+				GraphContext::EdgeTable(name) | GraphContext::TargetTable(name) => {
+					if let Some(table) = schema.table(&name) {
+						let content = format_table_hover(&name, table, schema.fields_of(&name));
+						return Ok(Some(Hover {
+							contents: HoverContents::Markup(MarkupContent {
+								kind: MarkupKind::Markdown,
+								value: content,
+							}),
+							range: word_range,
+						}));
+					}
+				}
+				GraphContext::FieldOnTarget { table, field } => {
+					if let Some(f) = schema.field_on(&table, &field) {
+						let content = format_nested_field_hover(&table, &field, f);
+						return Ok(Some(Hover {
+							contents: HoverContents::Markup(MarkupContent {
+								kind: MarkupKind::Markdown,
+								value: content,
+							}),
+							range: word_range,
+						}));
+					}
+				}
+			}
+		}
+
+		// Nested field hover: settings.theme -> resolve through schema
+		if let Some(table_name) = context::table_context_at_position(&source, position) {
+			let dotted = dotted_path_at_position(&source, position);
+			if dotted.contains('.') {
+				// Try the full dotted path as a field name (e.g. "settings.theme")
+				if let Some(f) = schema.field_on(&table_name, &dotted) {
+					let content = format_nested_field_hover(&table_name, &dotted, f);
+					return Ok(Some(Hover {
+						contents: HoverContents::Markup(MarkupContent {
+							kind: MarkupKind::Markdown,
+							value: content,
+						}),
+						range: word_range,
+					}));
+				}
+			}
 		}
 
 		// Field hover — context-aware: show only the field from the current table
@@ -689,8 +1007,10 @@ impl LanguageServer for Backend {
 			}));
 		}
 
-		// SurrealQL keyword documentation
-		if let Some(doc) = keyword_documentation(&word) {
+		// SurrealQL keyword documentation — check for compound keywords (DEFINE TABLE, etc.)
+		let compound_word = detect_compound_keyword(&source, position, &word);
+		let lookup = compound_word.as_deref().unwrap_or(&word);
+		if let Some(doc) = keyword_documentation(lookup) {
 			return Ok(Some(Hover {
 				contents: HoverContents::Markup(MarkupContent {
 					kind: MarkupKind::Markdown,
@@ -710,7 +1030,7 @@ impl LanguageServer for Backend {
 			Some(s) => s,
 			None => return Ok(None),
 		};
-		let schema = self.effective_schema(uri);
+		let schema = self.effective_schema(uri).await;
 		Ok(signature::signature_help(&source, position, Some(&schema)))
 	}
 
@@ -730,7 +1050,7 @@ impl LanguageServer for Backend {
 			return Ok(None);
 		}
 
-		let schema = self.effective_schema(uri);
+		let schema = self.effective_schema(uri).await;
 
 		// Try to find definition location
 		let fn_name = word.strip_prefix("fn::").unwrap_or(&word);
@@ -768,16 +1088,98 @@ impl LanguageServer for Backend {
 			None => return Ok(None),
 		};
 
-		let word = word_at_position(&source, position);
-		if word.is_empty() {
-			return Ok(None);
+		let symbol = context::classify_symbol_at_position(&source, position);
+
+		// Collect all document sources: open documents + workspace .surql files
+		let mut all_sources = self.documents.all();
+		let open_uris: std::collections::HashSet<Url> =
+			all_sources.iter().map(|(u, _)| u.clone()).collect();
+		if let Some(root) = self.workspace_root.read().await.as_ref() {
+			for (ws_uri, ws_source) in context::collect_workspace_surql_sources(root) {
+				if !open_uris.contains(&ws_uri) {
+					all_sources.push((ws_uri, ws_source));
+				}
+			}
 		}
 
-		// Find all occurrences of the word in all open documents
 		let mut locations = Vec::new();
-		for entry in self.documents.all() {
-			let (doc_uri, doc_source) = entry;
-			find_word_occurrences(&doc_source, &word, &doc_uri, &mut locations);
+
+		match symbol {
+			Some(context::SymbolKind::Table(ref table_name)) => {
+				for (doc_uri, doc_source) in &all_sources {
+					let refs = context::extract_all_table_occurrences(doc_source, table_name);
+					for r in refs {
+						locations.push(Location {
+							uri: doc_uri.clone(),
+							range: Range {
+								start: Position {
+									line: r.line,
+									character: r.col,
+								},
+								end: Position {
+									line: r.line,
+									character: r.col + r.len,
+								},
+							},
+						});
+					}
+				}
+			}
+			Some(context::SymbolKind::Field {
+				ref table,
+				ref field,
+			}) => {
+				for (doc_uri, doc_source) in &all_sources {
+					let refs = context::find_field_references(doc_source, table, field);
+					for r in refs {
+						locations.push(Location {
+							uri: doc_uri.clone(),
+							range: Range {
+								start: Position {
+									line: r.line,
+									character: r.col,
+								},
+								end: Position {
+									line: r.line,
+									character: r.col + r.len,
+								},
+							},
+						});
+					}
+				}
+			}
+			Some(context::SymbolKind::Function(ref fn_name)) => {
+				for (doc_uri, doc_source) in &all_sources {
+					let refs = context::find_function_references_in(doc_source, fn_name);
+					for r in refs {
+						locations.push(Location {
+							uri: doc_uri.clone(),
+							range: Range {
+								start: Position {
+									line: r.line,
+									character: r.col,
+								},
+								end: Position {
+									line: r.line,
+									character: r.col + r.len,
+								},
+							},
+						});
+					}
+				}
+			}
+			_ => {
+				let word = match &symbol {
+					Some(context::SymbolKind::Unknown(w)) => w.clone(),
+					_ => word_at_position(&source, position),
+				};
+				if word.is_empty() {
+					return Ok(None);
+				}
+				for (doc_uri, doc_source) in &all_sources {
+					find_word_occurrences(doc_source, &word, doc_uri, &mut locations);
+				}
+			}
 		}
 
 		if locations.is_empty() {
@@ -785,6 +1187,145 @@ impl LanguageServer for Backend {
 		} else {
 			Ok(Some(locations))
 		}
+	}
+
+	async fn prepare_rename(
+		&self,
+		params: TextDocumentPositionParams,
+	) -> Result<Option<PrepareRenameResponse>> {
+		let uri = &params.text_document.uri;
+		if Self::is_rust_file(uri) {
+			return Ok(None);
+		}
+		let source = match self.documents.get(uri) {
+			Some(s) => s,
+			None => return Ok(None),
+		};
+
+		let (word, range) = word_and_range_at_position(&source, params.position);
+		if word.is_empty() {
+			return Ok(None);
+		}
+
+		let schema = self.effective_schema(uri).await;
+		let is_table = schema.table(&word).is_some();
+		let fn_name = word.strip_prefix("fn::").unwrap_or(&word);
+		let is_function = schema.function(fn_name).is_some();
+
+		if !is_table && !is_function {
+			return Ok(None);
+		}
+
+		match range {
+			Some(r) => Ok(Some(PrepareRenameResponse::Range(r))),
+			None => Ok(None),
+		}
+	}
+
+	async fn rename(&self, params: RenameParams) -> Result<Option<WorkspaceEdit>> {
+		let uri = &params.text_document_position.text_document.uri;
+		if Self::is_rust_file(uri) {
+			return Ok(None);
+		}
+		let source = match self.documents.get(uri) {
+			Some(s) => s,
+			None => return Ok(None),
+		};
+
+		let old_name = word_at_position(&source, params.text_document_position.position);
+		if old_name.is_empty() {
+			return Ok(None);
+		}
+
+		let new_name = &params.new_name;
+		if new_name.is_empty() || old_name == *new_name {
+			return Ok(None);
+		}
+
+		let schema = self.effective_schema(uri).await;
+		let is_table = schema.table(&old_name).is_some();
+		let fn_name = old_name.strip_prefix("fn::").unwrap_or(&old_name);
+		let is_function = schema.function(fn_name).is_some();
+
+		if !is_table && !is_function {
+			return Ok(None);
+		}
+
+		let mut changes: std::collections::HashMap<Url, Vec<TextEdit>> =
+			std::collections::HashMap::new();
+
+		if is_table {
+			// Collect all .surql file contents: open documents + workspace files on disk
+			let file_contents = self.collect_workspace_surql_files().await;
+
+			for (file_uri, content) in &file_contents {
+				let occurrences = context::extract_all_table_occurrences(content, &old_name);
+				if occurrences.is_empty() {
+					continue;
+				}
+				let edits: Vec<TextEdit> = occurrences
+					.iter()
+					.map(|occ| TextEdit {
+						range: Range {
+							start: Position {
+								line: occ.line,
+								character: occ.col,
+							},
+							end: Position {
+								line: occ.line,
+								character: occ.col + occ.len,
+							},
+						},
+						new_text: new_name.clone(),
+					})
+					.collect();
+				changes.insert(file_uri.clone(), edits);
+			}
+		} else if is_function {
+			let full_fn_name = if old_name.starts_with("fn::") {
+				old_name.clone()
+			} else {
+				format!("fn::{old_name}")
+			};
+			let full_new_name = if new_name.starts_with("fn::") {
+				new_name.clone()
+			} else {
+				format!("fn::{new_name}")
+			};
+			let file_contents = self.collect_workspace_surql_files().await;
+			for (file_uri, content) in &file_contents {
+				let refs = context::find_function_references_in(content, &full_fn_name);
+				if refs.is_empty() {
+					continue;
+				}
+				let edits: Vec<TextEdit> = refs
+					.iter()
+					.map(|r| TextEdit {
+						range: Range {
+							start: Position {
+								line: r.line,
+								character: r.col,
+							},
+							end: Position {
+								line: r.line,
+								character: r.col + r.len,
+							},
+						},
+						new_text: full_new_name.clone(),
+					})
+					.collect();
+				changes.insert(file_uri.clone(), edits);
+			}
+		}
+
+		if changes.is_empty() {
+			return Ok(None);
+		}
+
+		Ok(Some(WorkspaceEdit {
+			changes: Some(changes),
+			..Default::default()
+		}))
 	}
 
 	async fn semantic_tokens_full(
@@ -878,6 +1419,71 @@ impl LanguageServer for Backend {
 		}
 	}
 
+	async fn code_action(&self, params: CodeActionParams) -> Result<Option<CodeActionResponse>> {
+		let uri = &params.text_document.uri;
+		let source = match self.documents.get(uri) {
+			Some(s) => s,
+			None => return Ok(None),
+		};
+
+		let mut actions = Vec::new();
+
+		for diag in &params.context.diagnostics {
+			let suppress_code = if diag.message.contains("is not defined in workspace") {
+				Some("undefined-table")
+			} else if diag.message.contains("record link target") {
+				Some("undefined-record-link")
+			} else {
+				None
+			};
+
+			if let Some(code) = suppress_code {
+				let line_idx = diag.range.start.line as usize;
+				let line = source.lines().nth(line_idx).unwrap_or("");
+
+				// Find end of actual code (before any existing comment)
+				let code_end = line
+					.find("--")
+					.or_else(|| line.find("//"))
+					.unwrap_or(line.len());
+				let trimmed_end = line[..code_end].trim_end().len();
+
+				let insert_pos = Position {
+					line: diag.range.start.line,
+					character: trimmed_end as u32,
+				};
+
+				let edit = TextEdit {
+					range: Range {
+						start: insert_pos,
+						end: insert_pos,
+					},
+					new_text: format!("  -- surql-allow: {code}"),
+				};
+
+				let mut changes = std::collections::HashMap::new();
+				changes.insert(uri.clone(), vec![edit]);
+
+				actions.push(CodeActionOrCommand::CodeAction(CodeAction {
+					title: format!("Suppress with -- surql-allow: {code}"),
+					kind: Some(CodeActionKind::QUICKFIX),
+					diagnostics: Some(vec![diag.clone()]),
+					edit: Some(WorkspaceEdit {
+						changes: Some(changes),
+						..Default::default()
+					}),
+					..Default::default()
+				}));
+			}
+		}
+
+		if actions.is_empty() {
+			Ok(None)
+		} else {
+			Ok(Some(actions))
+		}
+	}
+
 	async fn did_close(&self, params: DidCloseTextDocumentParams) {
 		let uri = params.text_document.uri;
 		self.documents.close(&uri);
@@ -886,279 +1492,7 @@ impl LanguageServer for Backend {
 	}
 }
 
-/// Write file manifest and schema cache for the Zed extension.
-///
-/// Writes to two locations:
-/// 1. `surql-lsp-out/files.json` in project root (for general use)
-/// 2. Zed extension work dir (WASM can read via `std::fs` from `.`)
-fn write_file_manifest(root: &std::path::Path, schema: &SchemaGraph) {
-	let mut files = Vec::new();
-	collect_manifest_files(root, root, &mut files);
-	files.sort();
-
-	// Build schema cache from files
-	let mut schema_text = String::new();
-	let mut file_count = 0;
-	for rel_path in &files {
-		let full_path = root.join(rel_path);
-		let content = match std::fs::read_to_string(&full_path) {
-			Ok(c) => c,
-			Err(_) => continue,
-		};
-		let mut defs = Vec::new();
-		for line in content.lines() {
-			let trimmed = line.trim().to_uppercase();
-			if trimmed.starts_with("DEFINE TABLE ")
-				|| trimmed.starts_with("DEFINE FIELD ")
-				|| trimmed.starts_with("DEFINE INDEX ")
-				|| trimmed.starts_with("DEFINE EVENT ")
-				|| trimmed.starts_with("DEFINE FUNCTION ")
-			{
-				defs.push(line.trim().to_string());
-			}
-		}
-		if defs.is_empty() {
-			continue;
-		}
-		file_count += 1;
-		schema_text.push_str(&format!("## {rel_path}\n\n```surql\n"));
-		for d in &defs {
-			schema_text.push_str(d);
-			schema_text.push('\n');
-		}
-		schema_text.push_str("```\n\n");
-	}
-	if !schema_text.is_empty() {
-		schema_text = format!("*{file_count} schema file(s)*\n\n{schema_text}");
-	}
-
-	// Build relations graph and info summary from SchemaGraph
-	let relations_text = build_relations_graph(schema);
-	let info_text = build_info_summary(schema, &files, root);
-
-	// Write to project root
-	let manifest_dir = root.join("surql-lsp-out");
-	if std::fs::create_dir_all(&manifest_dir).is_ok() {
-		let _ = std::fs::write(
-			manifest_dir.join("files.json"),
-			serde_json::to_string_pretty(&files).unwrap_or_else(|_| "[]".to_string()),
-		);
-		let _ = std::fs::write(manifest_dir.join("schema.md"), &schema_text);
-		let _ = std::fs::write(manifest_dir.join("relations.md"), &relations_text);
-		let _ = std::fs::write(manifest_dir.join("info.md"), &info_text);
-	}
-
-	// Write to Zed extension work dir (WASM reads from ".")
-	if let Ok(home) = std::env::var("HOME") {
-		let zed_ext_dir = std::path::Path::new(&home)
-			.join("Library/Application Support/Zed/extensions/work/surrealql");
-		if zed_ext_dir.exists() {
-			let _ = std::fs::write(zed_ext_dir.join("schema.md"), &schema_text);
-			let _ = std::fs::write(zed_ext_dir.join("relations.md"), &relations_text);
-			let _ = std::fs::write(zed_ext_dir.join("info.md"), &info_text);
-			tracing::info!("Schema + relations + info cache written to Zed extension dir");
-		}
-	}
-}
-
-fn build_info_summary(schema: &SchemaGraph, files: &[String], root: &std::path::Path) -> String {
-	let table_count = schema.table_names().count();
-	let fn_count = schema.function_names().count();
-	let param_count = schema.param_names().count();
-
-	let mut total_fields = 0;
-	let mut total_indexes = 0;
-	let mut total_events = 0;
-	let mut total_relations = 0;
-	let mut schemafull_count = 0;
-
-	for table_name in schema.table_names() {
-		if let Some(table) = schema.table(table_name) {
-			total_fields += table.fields.len();
-			total_indexes += table.indexes.len();
-			total_events += table.events.len();
-			if table.full {
-				schemafull_count += 1;
-			}
-			for field in &table.fields {
-				total_relations += field.record_links.len();
-			}
-		}
-	}
-
-	let manifest_info = detect_overshift_manifest(root)
-		.map(|(ns, db)| format!("- **Namespace:** `{ns}`\n- **Database:** `{db}`\n"))
-		.unwrap_or_default();
-
-	format!(
-		"# SurrealQL Workspace Info\n\n\
-		 ## Overview\n\n\
-		 - **{table_count}** tables ({schemafull_count} SCHEMAFULL, {} SCHEMALESS)\n\
-		 - **{total_fields}** fields\n\
-		 - **{total_indexes}** indexes\n\
-		 - **{total_events}** events\n\
-		 - **{total_relations}** record links\n\
-		 - **{fn_count}** functions\n\
-		 - **{param_count}** params\n\
-		 - **{}** .surql files\n\n\
-		 {manifest_info}\
-		 ## Available Commands\n\n\
-		 | Command | Description |\n\
-		 |---------|-------------|\n\
-		 | `/surql-schema` | Show all DEFINE statements |\n\
-		 | `/surql-relations` | Table relationship graph |\n\
-		 | `/surql-info` | This summary |\n",
-		table_count - schemafull_count,
-		files.len()
-	)
-}
-
-fn build_relations_graph(schema: &SchemaGraph) -> String {
-	let mut table_names: Vec<&str> = schema.table_names().collect();
-	table_names.sort();
-
-	if table_names.is_empty() {
-		return "No tables defined".to_string();
-	}
-
-	let mut text = String::new();
-	let mut edges: Vec<(String, String, String)> = Vec::new();
-
-	// Collect all edges (table → linked_table via field)
-	for table_name in &table_names {
-		if let Some(table) = schema.table(table_name) {
-			for field in &table.fields {
-				for link in &field.record_links {
-					edges.push((table_name.to_string(), link.clone(), field.name.clone()));
-				}
-			}
-		}
-	}
-
-	// Table summary
-	text.push_str(&format!("**{} tables**\n\n", table_names.len()));
-
-	// ASCII graph
-	text.push_str("```\n");
-	for table_name in &table_names {
-		let table = match schema.table(table_name) {
-			Some(t) => t,
-			None => continue,
-		};
-
-		let schema_type = if table.full {
-			"SCHEMAFULL"
-		} else {
-			"SCHEMALESS"
-		};
-		let field_count = table.fields.len();
-		let index_count = table.indexes.len();
-		let event_count = table.events.len();
-
-		let mut meta = vec![schema_type.to_string()];
-		if field_count > 0 {
-			meta.push(format!("{field_count}f"));
-		}
-		if index_count > 0 {
-			meta.push(format!("{index_count}i"));
-		}
-		if event_count > 0 {
-			meta.push(format!("{event_count}e"));
-		}
-
-		text.push_str(&format!("[{table_name}] ({})\n", meta.join(", ")));
-
-		// Outgoing links
-		let outgoing: Vec<_> = edges
-			.iter()
-			.filter(|(from, _, _)| from == *table_name)
-			.collect();
-		for (_, to, field) in &outgoing {
-			text.push_str(&format!(
-				"  \u{2514}\u{2500}\u{2500} .{field} \u{2192} [{to}]\n"
-			));
-		}
-
-		// Incoming links
-		let incoming: Vec<_> = edges
-			.iter()
-			.filter(|(_, to, _)| to == *table_name)
-			.collect();
-		for (from, _, field) in &incoming {
-			text.push_str(&format!(
-				"  \u{2514}\u{2500}\u{2500} [{from}].{field} \u{2192} *\n"
-			));
-		}
-	}
-	text.push_str("```\n");
-
-	// Edge list
-	if !edges.is_empty() {
-		text.push_str(&format!("\n**{} relation(s)**\n\n", edges.len()));
-		for (from, to, field) in &edges {
-			text.push_str(&format!("- `{from}.{field}` \u{2192} `{to}`\n"));
-		}
-	}
-
-	text
-}
-
-fn collect_manifest_files(base: &std::path::Path, dir: &std::path::Path, out: &mut Vec<String>) {
-	let entries = match std::fs::read_dir(dir) {
-		Ok(e) => e,
-		Err(_) => return,
-	};
-	for entry in entries.filter_map(|e| e.ok()) {
-		let path = entry.path();
-		if path.is_dir() {
-			let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-			if matches!(
-				name,
-				"target"
-					| "node_modules"
-					| ".git" | "build"
-					| "fixtures" | "dist"
-					| ".cache" | "surql-lsp-out"
-			) || name.starts_with('.')
-			{
-				continue;
-			}
-			collect_manifest_files(base, &path, out);
-		} else if path.extension().is_some_and(|ext| ext == "surql")
-			&& let Ok(rel) = path.strip_prefix(base)
-		{
-			out.push(rel.to_string_lossy().to_string());
-		}
-	}
-}
-
-/// Find the source range of a `record<table_name>` reference.
-/// Detect and log overshift manifest.toml in the workspace.
-/// Looks for manifest.toml in common locations: root, surql/, sql/.
-fn detect_overshift_manifest(root: &std::path::Path) -> Option<(String, String)> {
-	let candidates = [
-		root.join("manifest.toml"),
-		root.join("surql/manifest.toml"),
-		root.join("sql/manifest.toml"),
-	];
-	for path in &candidates {
-		if let Ok(content) = std::fs::read_to_string(path)
-			&& let Ok(manifest) = toml::from_str::<toml::Value>(&content)
-			&& let Some(meta) = manifest.get("meta")
-		{
-			let ns = meta.get("ns").and_then(|v| v.as_str())?.to_string();
-			let db = meta.get("db").and_then(|v| v.as_str())?.to_string();
-			tracing::info!(
-				"Detected overshift manifest at {}: NS={ns}, DB={db}",
-				path.display()
-			);
-			return Some((ns, db));
-		}
-	}
-	None
-}
-
-pub(crate) fn find_record_link_range(source: &str, table_name: &str) -> Range {
+pub(crate) fn find_record_link_range(source: &str, table_name: &str) -> Option<Range> {
 	let search = format!("record<{table_name}>");
 	let search_upper = format!("record<{}>", table_name.to_uppercase());
 	for (line_num, line) in source.lines().enumerate() {
@@ -1167,7 +1501,7 @@ pub(crate) fn find_record_link_range(source: &str, table_name: &str) -> Range {
 			let upper_pattern = pattern.to_uppercase();
 			if let Some(col) = upper_line.find(&upper_pattern) {
 				let inner_start = col + "record<".len();
-				return Range {
+				return Some(Range {
 					start: Position {
 						line: line_num as u32,
 						character: inner_start as u32,
@@ -1176,20 +1510,39 @@ pub(crate) fn find_record_link_range(source: &str, table_name: &str) -> Range {
 						line: line_num as u32,
 						character: (inner_start + table_name.len()) as u32,
 					},
-				};
+				});
 			}
 		}
 	}
-	Range {
-		start: Position {
-			line: 0,
-			character: 0,
-		},
-		end: Position {
-			line: 0,
-			character: 0,
-		},
+	None
+}
+
+/// Check whether a source line contains a suppress comment for the given diagnostic code.
+///
+/// Supports both `// surql-allow: <code>` and `-- surql-allow: <code>` comment styles.
+/// The code is matched case-insensitively.
+pub(crate) fn line_has_suppress(source: &str, line_number: u32, code: &str) -> bool {
+	let Some(line_text) = source.lines().nth(line_number as usize) else {
+		return false;
+	};
+	let lower = line_text.to_lowercase();
+	let code_lower = code.to_lowercase();
+	for comment_marker in ["//", "--"] {
+		if let Some(pos) = lower.find(comment_marker) {
+			let after_marker = &lower[pos + comment_marker.len()..];
+			let trimmed = after_marker.trim_start();
+			if let Some(rest) = trimmed.strip_prefix("surql-allow:") {
+				let allowed = rest.trim();
+				if allowed == code_lower
+					|| allowed.starts_with(&format!("{code_lower} "))
+					|| allowed.starts_with(&format!("{code_lower},"))
+				{
+					return true;
+				}
+			}
+		}
 	}
+	false
 }
 
 /// Build a hierarchical DocumentSymbol tree from a schema and source text.
@@ -1517,28 +1870,41 @@ fn find_define_on_table_range(source: &str, kind: &str, name: &str, table: &str)
 	find_define_statement_range(source, "TABLE", table)
 }
 
-/// Convert a byte offset in source text to an LSP Position (0-indexed line/col).
+/// Convert a byte offset in source text to an LSP Position (0-indexed line, UTF-16 column).
 pub(crate) fn byte_offset_to_position(source: &str, offset: usize) -> Position {
 	let offset = offset.min(source.len());
 	let before = &source[..offset];
 	let line = before.matches('\n').count() as u32;
-	let col = before.rfind('\n').map(|i| offset - i - 1).unwrap_or(offset) as u32;
-	Position {
-		line,
-		character: col,
-	}
+	let line_start = before.rfind('\n').map(|i| i + 1).unwrap_or(0);
+	let line_text = &source[line_start..offset];
+	let character = line_text.chars().map(|c| c.len_utf16() as u32).sum();
+	Position { line, character }
 }
 
 /// Extract the word (identifier) at a cursor position, with its range.
+///
+/// Converts the UTF-16 `position.character` to a byte offset before scanning,
+/// and converts byte offsets back to UTF-16 code units for the returned range.
 pub(crate) fn word_and_range_at_position(
 	source: &str,
 	position: Position,
 ) -> (String, Option<Range>) {
-	let line = match source.lines().nth(position.line as usize) {
-		Some(l) => l,
+	let line = match source.split('\n').nth(position.line as usize) {
+		Some(l) => l.strip_suffix('\r').unwrap_or(l),
 		None => return (String::new(), None),
 	};
-	let col = position.character as usize;
+
+	// Convert UTF-16 character offset to byte offset within the line
+	let mut utf16_count = 0u32;
+	let mut col = line.len(); // default: end of line
+	for (byte_idx, ch) in line.char_indices() {
+		if utf16_count >= position.character {
+			col = byte_idx;
+			break;
+		}
+		utf16_count += ch.len_utf16() as u32;
+	}
+
 	let bytes = line.as_bytes();
 
 	let start = (0..col)
@@ -1558,14 +1924,19 @@ pub(crate) fn word_and_range_at_position(
 
 	if start <= end && end <= line.len() {
 		let word = line[start..end].to_string();
+
+		// Convert byte offsets back to UTF-16 code units for the range
+		let start_utf16: u32 = line[..start].chars().map(|c| c.len_utf16() as u32).sum();
+		let end_utf16: u32 = line[..end].chars().map(|c| c.len_utf16() as u32).sum();
+
 		let range = Range {
 			start: Position {
 				line: position.line,
-				character: start as u32,
+				character: start_utf16,
 			},
 			end: Position {
 				line: position.line,
-				character: end as u32,
+				character: end_utf16,
 			},
 		};
 		(word, Some(range))
@@ -1577,80 +1948,6 @@ pub(crate) fn word_and_range_at_position(
 /// Extract the word (identifier) at a cursor position.
 pub(crate) fn word_at_position(source: &str, position: Position) -> String {
 	word_and_range_at_position(source, position).0
-}
-
-/// SurrealQL type documentation for hover.
-fn type_documentation(word: &str, schema: &surql_parser::SchemaGraph) -> Option<String> {
-	let lower = word.to_lowercase();
-	let doc = match lower.as_str() {
-		"string" => {
-			"**string** — UTF-8 text\n\n```surql\nDEFINE FIELD name ON user TYPE string\n```\n\n[Docs](https://surrealdb.com/docs/surrealql/datamodel/strings)"
-		}
-		"int" => {
-			"**int** — 64-bit signed integer\n\n```surql\nDEFINE FIELD age ON user TYPE int\n```\n\n[Docs](https://surrealdb.com/docs/surrealql/datamodel/numbers)"
-		}
-		"float" => {
-			"**float** — 64-bit floating point\n\n```surql\nDEFINE FIELD score ON user TYPE float\n```\n\n[Docs](https://surrealdb.com/docs/surrealql/datamodel/numbers)"
-		}
-		"decimal" => {
-			"**decimal** — Arbitrary precision decimal\n\n```surql\nDEFINE FIELD price ON product TYPE decimal\n```\n\n[Docs](https://surrealdb.com/docs/surrealql/datamodel/numbers)"
-		}
-		"number" => {
-			"**number** — Any numeric type (int, float, or decimal)\n\n```surql\nDEFINE FIELD value ON data TYPE number\n```\n\n[Docs](https://surrealdb.com/docs/surrealql/datamodel/numbers)"
-		}
-		"bool" => {
-			"**bool** — Boolean (true/false)\n\n```surql\nDEFINE FIELD active ON user TYPE bool DEFAULT true\n```\n\n[Docs](https://surrealdb.com/docs/surrealql/datamodel/booleans)"
-		}
-		"datetime" => {
-			"**datetime** — ISO 8601 timestamp\n\n```surql\nDEFINE FIELD created_at ON user TYPE datetime DEFAULT time::now()\n```\n\n[Docs](https://surrealdb.com/docs/surrealql/datamodel/datetimes)"
-		}
-		"duration" => {
-			"**duration** — Time span (e.g., 1h, 30m, 7d)\n\n```surql\nDEFINE FIELD ttl ON cache TYPE duration\n```\n\n[Docs](https://surrealdb.com/docs/surrealql/datamodel/durations)"
-		}
-		"object" => {
-			"**object** — JSON-like object (key-value map)\n\n```surql\nDEFINE FIELD settings ON user TYPE object DEFAULT {}\n```\n\n[Docs](https://surrealdb.com/docs/surrealql/datamodel/objects)"
-		}
-		"array" => {
-			"**array** — Ordered collection. Parameterized: `array<string>`\n\n```surql\nDEFINE FIELD tags ON post TYPE array<string> DEFAULT []\n```\n\n[Docs](https://surrealdb.com/docs/surrealql/datamodel/arrays)"
-		}
-		"set" => {
-			"**set** — Unique collection (no duplicates). Parameterized: `set<string>`\n\n```surql\nDEFINE FIELD roles ON user TYPE set<string>\n```\n\n[Docs](https://surrealdb.com/docs/surrealql/datamodel/sets)"
-		}
-		"option" => {
-			"**option** — Nullable type. `option<T>` means the field can be NONE\n\n```surql\nDEFINE FIELD bio ON user TYPE option<string>\n```\n\n[Docs](https://surrealdb.com/docs/surrealql/datamodel/values)"
-		}
-		"record" => {
-			let tables: Vec<_> = schema.table_names().collect();
-			let table_list = if tables.is_empty() {
-				String::new()
-			} else {
-				format!(
-					"\n\nTables in schema: `{}`",
-					tables.into_iter().collect::<Vec<_>>().join("`, `")
-				)
-			};
-			return Some(format!(
-				"**record** — Link to another record. Parameterized: `record<table>`\n\n\
-				 ```surql\nDEFINE FIELD author ON post TYPE record<user>\n```\n\n\
-				 The linked record can be fetched with `FETCH`.{table_list}\n\n\
-				 [Docs](https://surrealdb.com/docs/surrealql/datamodel/records)"
-			));
-		}
-		"uuid" => {
-			"**uuid** — Universally unique identifier\n\n```surql\nDEFINE FIELD id ON user TYPE uuid DEFAULT rand::uuid::v4()\n```\n\n[Docs](https://surrealdb.com/docs/surrealql/datamodel/uuid)"
-		}
-		"bytes" => {
-			"**bytes** — Binary data\n\n[Docs](https://surrealdb.com/docs/surrealql/datamodel/bytes)"
-		}
-		"geometry" => {
-			"**geometry** — GeoJSON geometry (point, line, polygon, etc.)\n\n[Docs](https://surrealdb.com/docs/surrealql/datamodel/geometries)"
-		}
-		"any" => {
-			"**any** — Accepts any type (no type constraint)\n\n```surql\nDEFINE FIELD data ON flexible_table TYPE any\n```\n\n[Docs](https://surrealdb.com/docs/surrealql/datamodel/values)"
-		}
-		_ => return None,
-	};
-	Some(doc.to_string())
 }
 
 /// Find all occurrences of a word in source text and add them as Locations.
@@ -1716,7 +2013,10 @@ fn tokenize_surql_region(
 	// Lexer may panic on malformed input — catch and skip
 	let token_list: Vec<_> = match std::panic::catch_unwind(|| Lexer::new(bytes).collect()) {
 		Ok(t) => t,
-		Err(_) => return,
+		Err(e) => {
+			tracing::error!("Lexer panicked during semantic token extraction: {e:?}");
+			return;
+		}
 	};
 
 	let mut prev_line = region.line;
@@ -1760,239 +2060,26 @@ fn tokenize_surql_region(
 	}
 }
 
-fn format_table_hover(
-	name: &str,
-	table: &surql_parser::schema_graph::TableDef,
-	fields: &[surql_parser::schema_graph::FieldDef],
-) -> String {
-	let schema_type = if table.full {
-		"SCHEMAFULL"
-	} else {
-		"SCHEMALESS"
-	};
-	let comment_line = table
-		.comment
-		.as_ref()
-		.map(|c| format!("\n\n*{c}*"))
-		.unwrap_or_default();
-	let field_list = fields
-		.iter()
-		.map(|f| {
-			let kind = f.kind.as_deref().unwrap_or("any");
-			let default = f
-				.default
-				.as_ref()
-				.map(|d| format!(" DEFAULT {d}"))
-				.unwrap_or_default();
-			let readonly = if f.readonly { " READONLY" } else { "" };
-			let comment = f
-				.comment
-				.as_ref()
-				.map(|c| format!("  -- {c}"))
-				.unwrap_or_default();
-			format!("{} : {kind}{default}{readonly}{comment}", f.name)
-		})
-		.collect::<Vec<_>>()
-		.join("\n");
-	format!(
-		"```surql\n-- TABLE {name} ({schema_type})\n```\n{comment_line}\n\n\
-		 ```surql\n{field_list}\n```"
-	)
-}
-
-fn format_function_hover(func: &surql_parser::schema_graph::FunctionDef) -> String {
-	let args = func
-		.args
-		.iter()
-		.map(|(n, t)| format!("{n}: {t}"))
-		.collect::<Vec<_>>()
-		.join(", ");
-	let ret = func
-		.returns
-		.as_ref()
-		.map(|r| format!(" -> {r}"))
-		.unwrap_or_default();
-	let comment_line = func
-		.comment
-		.as_ref()
-		.map(|c| format!("\n\n*{c}*"))
-		.unwrap_or_default();
-	format!(
-		"**FUNCTION** `fn::{}`{comment_line}\n\n```surql\nfn::{}({args}){ret}\n```",
-		func.name, func.name
-	)
-}
-
-/// SurrealQL keyword documentation for hover.
-pub(crate) fn keyword_documentation(word: &str) -> Option<&'static str> {
-	match word.to_uppercase().as_str() {
-		"SELECT" => Some(
-			"**SELECT** — Query data from tables\n\n\
-			 ```surql\nSELECT field1, field2 FROM table WHERE condition\n\
-			 ORDER BY field LIMIT n\n```\n\n\
-			 [Docs](https://surrealdb.com/docs/surrealql/statements/select)",
-		),
-		"CREATE" => Some(
-			"**CREATE** — Create a new record\n\n\
-			 ```surql\nCREATE table SET field = value\n\
-			 CREATE table CONTENT { field: value }\n```\n\n\
-			 [Docs](https://surrealdb.com/docs/surrealql/statements/create)",
-		),
-		"UPDATE" => Some(
-			"**UPDATE** — Modify existing records\n\n\
-			 ```surql\nUPDATE table SET field = value WHERE condition\n\
-			 UPDATE table MERGE { field: value }\n```\n\n\
-			 [Docs](https://surrealdb.com/docs/surrealql/statements/update)",
-		),
-		"DELETE" => Some(
-			"**DELETE** — Remove records\n\n\
-			 ```surql\nDELETE table WHERE condition\nDELETE record:id\n```\n\n\
-			 [Docs](https://surrealdb.com/docs/surrealql/statements/delete)",
-		),
-		"INSERT" => Some(
-			"**INSERT** — Insert records (supports ON DUPLICATE KEY UPDATE)\n\n\
-			 ```surql\nINSERT INTO table { field: value }\n\
-			 INSERT INTO table [{ ... }, { ... }]\n```\n\n\
-			 [Docs](https://surrealdb.com/docs/surrealql/statements/insert)",
-		),
-		"UPSERT" => Some(
-			"**UPSERT** — Create or update a record atomically\n\n\
-			 ```surql\nUPSERT table SET field = value WHERE condition\n```\n\n\
-			 [Docs](https://surrealdb.com/docs/surrealql/statements/upsert)",
-		),
-		"RELATE" => Some(
-			"**RELATE** — Create a graph edge between two records\n\n\
-			 ```surql\nRELATE from_record->edge_table->to_record\n\
-			 SET field = value\n```\n\n\
-			 [Docs](https://surrealdb.com/docs/surrealql/statements/relate)",
-		),
-		"DEFINE" => Some(
-			"**DEFINE** — Define schema elements\n\n\
-			 ```surql\nDEFINE TABLE name SCHEMAFULL\n\
-			 DEFINE FIELD name ON table TYPE string\n\
-			 DEFINE INDEX name ON table FIELDS field UNIQUE\n\
-			 DEFINE FUNCTION fn::name($arg: type) { ... }\n\
-			 DEFINE EVENT name ON table WHEN $event = 'CREATE' THEN { ... }\n```\n\n\
-			 [Docs](https://surrealdb.com/docs/surrealql/statements/define)",
-		),
-		"REMOVE" => Some(
-			"**REMOVE** — Remove schema definitions\n\n\
-			 ```surql\nREMOVE TABLE name\nREMOVE FIELD name ON table\n\
-			 REMOVE INDEX name ON table\n```\n\n\
-			 [Docs](https://surrealdb.com/docs/surrealql/statements/remove)",
-		),
-		"LET" => Some(
-			"**LET** — Bind a value to a parameter\n\n\
-			 ```surql\nLET $name = expression\n\
-			 LET $results = SELECT * FROM table\n```\n\n\
-			 [Docs](https://surrealdb.com/docs/surrealql/statements/let)",
-		),
-		"IF" => Some(
-			"**IF** — Conditional expression\n\n\
-			 ```surql\nIF condition { ... }\n\
-			 ELSE IF condition { ... }\n\
-			 ELSE { ... }\n```\n\n\
-			 [Docs](https://surrealdb.com/docs/surrealql/statements/ifelse)",
-		),
-		"FOR" => Some(
-			"**FOR** — Iterate over values\n\n\
-			 ```surql\nFOR $item IN $array { ... }\n```\n\n\
-			 [Docs](https://surrealdb.com/docs/surrealql/statements/for)",
-		),
-		"RETURN" => Some(
-			"**RETURN** — Return a value from a block or function\n\n\
-			 ```surql\nRETURN expression\n```\n\n\
-			 [Docs](https://surrealdb.com/docs/surrealql/statements/return)",
-		),
-		"BEGIN" => Some(
-			"**BEGIN** — Start a transaction\n\n\
-			 ```surql\nBEGIN TRANSACTION;\n-- statements\nCOMMIT TRANSACTION;\n```\n\n\
-			 [Docs](https://surrealdb.com/docs/surrealql/statements/begin)",
-		),
-		"COMMIT" => Some(
-			"**COMMIT** — Commit a transaction\n\n\
-			 ```surql\nCOMMIT TRANSACTION\n```\n\n\
-			 [Docs](https://surrealdb.com/docs/surrealql/statements/commit)",
-		),
-		"CANCEL" => Some(
-			"**CANCEL** — Roll back a transaction\n\n\
-			 ```surql\nCANCEL TRANSACTION\n```\n\n\
-			 [Docs](https://surrealdb.com/docs/surrealql/statements/cancel)",
-		),
-		"LIVE" => Some(
-			"**LIVE** — Subscribe to real-time changes\n\n\
-			 ```surql\nLIVE SELECT * FROM table\n\
-			 LIVE SELECT DIFF FROM table\n```\n\n\
-			 [Docs](https://surrealdb.com/docs/surrealql/statements/live)",
-		),
-		"KILL" => Some(
-			"**KILL** — Stop a live query\n\n\
-			 ```surql\nKILL $live_query_id\n```\n\n\
-			 [Docs](https://surrealdb.com/docs/surrealql/statements/kill)",
-		),
-		"USE" => Some(
-			"**USE** — Switch namespace or database\n\n\
-			 ```surql\nUSE NS namespace DB database\n```\n\n\
-			 [Docs](https://surrealdb.com/docs/surrealql/statements/use)",
-		),
-		"INFO" => Some(
-			"**INFO** — Show database information\n\n\
-			 ```surql\nINFO FOR DB\nINFO FOR TABLE name\nINFO FOR ROOT\n```\n\n\
-			 [Docs](https://surrealdb.com/docs/surrealql/statements/info)",
-		),
-		"SLEEP" => Some(
-			"**SLEEP** — Pause execution\n\n\
-			 ```surql\nSLEEP 1s\n```\n\n\
-			 [Docs](https://surrealdb.com/docs/surrealql/statements/sleep)",
-		),
-		"THROW" => Some(
-			"**THROW** — Throw a custom error\n\n\
-			 ```surql\nTHROW 'error message'\n```\n\n\
-			 [Docs](https://surrealdb.com/docs/surrealql/statements/throw)",
-		),
-		"SCHEMAFULL" => Some(
-			"**SCHEMAFULL** — Only allow defined fields on a table\n\n\
-			 ```surql\nDEFINE TABLE name SCHEMAFULL\n```\n\n\
-			 Undefined fields are rejected. Use SCHEMALESS for flexible structure.",
-		),
-		"SCHEMALESS" => Some(
-			"**SCHEMALESS** — Allow any fields on a table (default)\n\n\
-			 ```surql\nDEFINE TABLE name SCHEMALESS\n```\n\n\
-			 Any field can be set. Use SCHEMAFULL for strict structure.",
-		),
-		"CHANGEFEED" => Some(
-			"**CHANGEFEED** — Enable change tracking on a table\n\n\
-			 ```surql\nDEFINE TABLE name CHANGEFEED 1d INCLUDE ORIGINAL\n\
-			 SHOW CHANGES FOR TABLE name SINCE timestamp\n```\n\n\
-			 [Docs](https://surrealdb.com/docs/surrealql/statements/define/table)",
-		),
-		"PERMISSIONS" => Some(
-			"**PERMISSIONS** — Set access control on tables/fields\n\n\
-			 ```surql\nDEFINE TABLE name PERMISSIONS\n\
-			 \tFOR select WHERE published = true\n\
-			 \tFOR create, update WHERE $auth.id = author\n\
-			 \tFOR delete NONE\n```\n\n\
-			 [Docs](https://surrealdb.com/docs/surrealql/statements/define/table)",
-		),
-		"FETCH" => Some(
-			"**FETCH** — Eagerly load linked records\n\n\
-			 ```surql\nSELECT * FROM post FETCH author, comments\n```\n\n\
-			 Replaces record links with their full content.",
-		),
-		"VALUE" | "VALUES" => Some(
-			"**VALUE** / **VALUES** — Return raw value instead of wrapped result\n\n\
-			 ```surql\nSELECT VALUE name FROM user\n```\n\n\
-			 Returns flat array of values instead of array of objects.",
-		),
-		"EXPLAIN" => Some(
-			"**EXPLAIN** — Show query execution plan\n\n\
-			 ```surql\nSELECT * FROM user WHERE age > 18 EXPLAIN FULL\n```\n\n\
-			 [Docs](https://surrealdb.com/docs/surrealql/statements/select)",
-		),
-		"PARALLEL" => Some(
-			"**PARALLEL** — Execute query in parallel\n\n\
-			 ```surql\nSELECT * FROM user WHERE age > 18 PARALLEL\n```",
-		),
+/// Detect compound keywords like "DEFINE TABLE", "DEFINE FIELD", "ORDER BY", etc.
+fn detect_compound_keyword(source: &str, position: Position, current_word: &str) -> Option<String> {
+	let line = source.split('\n').nth(position.line as usize)?;
+	let col = position.character as usize;
+	let before = if col < line.len() { &line[..col] } else { line };
+	let trimmed = before.trim_end();
+	let prev_end = trimmed.rfind(|c: char| !c.is_ascii_whitespace())?;
+	let prev_word_end = prev_end + 1;
+	let prev_start = trimmed[..prev_word_end]
+		.rfind(|c: char| c.is_ascii_whitespace())
+		.map(|i| i + 1)
+		.unwrap_or(0);
+	let prev_word = trimmed[prev_start..prev_word_end].to_uppercase();
+	let word_upper = current_word.to_uppercase();
+	let compound = format!("{prev_word} {word_upper}");
+	match compound.as_str() {
+		"DEFINE TABLE" | "DEFINE FIELD" | "DEFINE INDEX" | "DEFINE FUNCTION" | "DEFINE EVENT"
+		| "DEFINE ANALYZER" | "DEFINE PARAM" | "DEFINE ACCESS" | "DEFINE NAMESPACE"
+		| "DEFINE DATABASE" | "ORDER BY" | "GROUP BY" | "SPLIT ON" | "INSERT INTO"
+		| "TYPE NORMAL" | "TYPE RELATION" | "TYPE ANY" => Some(compound),
 		_ => None,
 	}
 }

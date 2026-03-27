@@ -43,4 +43,8 @@ impl DocumentStore {
 			.map(|entry| (entry.key().clone(), entry.value().clone()))
 			.collect()
 	}
+
+	pub fn all_uris(&self) -> Vec<Url> {
+		self.docs.iter().map(|entry| entry.key().clone()).collect()
+	}
 }
