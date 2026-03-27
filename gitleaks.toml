@@ -1,8 +1,0 @@
-[extend]
-useDefault = true
-
-[[allowlists]]
-description = "SurrealQL doc examples use example JWT key pairs (not real secrets)"
-paths = [
-    "tests/fixtures/doc-examples/.*\\.surql",
-]
