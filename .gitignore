@@ -12,3 +12,7 @@ TODO.md
 DISCUSSION.md
 tree-sitter-surrealql/
 surql-lsp-out/
+coverage-report/
+.local/
+.fastembed_cache/
+editors/

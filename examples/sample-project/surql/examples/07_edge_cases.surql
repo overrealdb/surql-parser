@@ -3,36 +3,36 @@
 -- ═══════════════════════════════════════════════════════════
 
 -- ─── String varieties ───
-SELECT 'single quoted';
-SELECT "double quoted";
-SELECT 'escaped ''apostrophe''';
-SELECT "escaped \"quotes\"";
-SELECT 'unicode: 日本語 🚀 Ñoño';
+RETURN 'single quoted';
+RETURN "double quoted";
+RETURN "escaped 'apostrophe'";
+RETURN 'escaped "quotes"';
+RETURN 'unicode: 日本語 🚀 Ñoño';
 
 -- ─── Number varieties ───
-SELECT 42;
-SELECT 3.14;
-SELECT -1;
-SELECT 1_000_000;
-SELECT 1.5e10;
-SELECT 0.001;
+RETURN 42;
+RETURN 3.14;
+RETURN -1;
+RETURN 1_000_000;
+RETURN 1.5e10;
+RETURN 0.001;
 
 -- ─── Boolean & null ───
-SELECT true, false, NONE, NULL;
+RETURN [true, false, NONE, NULL];
 
 -- ─── Duration literals ───
-SELECT 1ns, 1µs, 1ms, 1s, 1m, 1h, 1d, 1w;
+RETURN [1ns, 1µs, 1ms, 1s, 1m, 1h, 1d, 1w];
 LET $timeout = 30s;
 SLEEP 500ms;
 
 -- ─── Datetime ───
-SELECT d'2024-01-15T10:30:00Z';
-SELECT d'2024-12-25';
+RETURN d'2024-01-15T10:30:00Z';
+RETURN d'2024-12-25';
 
 -- ─── Record IDs ───
-SELECT * FROM user:alice;
-SELECT * FROM user:123;
-SELECT * FROM user:⟨550e8400-e29b-41d4-a716-446655440000⟩;
+SELECT * FROM agent:overseer;
+SELECT * FROM project:surql_parser;
+SELECT * FROM migration:v001;
 
 -- ─── Backtick-escaped identifiers ───
 DEFINE TABLE `my table` SCHEMALESS;
@@ -40,22 +40,18 @@ DEFINE FIELD `field name` ON `my table` TYPE string;
 SELECT `field name` FROM `my table`;
 
 -- ─── Operators ───
-SELECT * FROM user WHERE age > 18;
-SELECT * FROM user WHERE age >= 18;
-SELECT * FROM user WHERE age < 65;
-SELECT * FROM user WHERE age <= 65;
-SELECT * FROM user WHERE age != 0;
-SELECT * FROM user WHERE name IS NOT NONE;
+SELECT * FROM agent WHERE active = true;
+SELECT * FROM migration WHERE version > 1;
+SELECT * FROM migration WHERE version >= 2;
+SELECT * FROM migration WHERE version < 10;
+SELECT * FROM spec WHERE status != 'draft';
+SELECT * FROM agent WHERE model IS NOT NONE;
 
 -- ─── Contains operators ───
-SELECT * FROM user WHERE tags CONTAINS 'admin';
-SELECT * FROM user WHERE tags CONTAINSALL ['admin', 'dev'];
-SELECT * FROM user WHERE tags CONTAINSANY ['admin', 'mod'];
-SELECT * FROM user WHERE tags CONTAINSNONE ['banned'];
-
--- ─── Geo operators ───
--- SELECT * FROM restaurant WHERE location INSIDE $area;
--- SELECT * FROM city WHERE boundary INTERSECTS $route;
+SELECT * FROM schema_diff WHERE missing_tables CONTAINS 'agent';
+SELECT * FROM schema_diff WHERE missing_tables CONTAINSALL ['agent', 'project'];
+SELECT * FROM schema_diff WHERE extra_tables CONTAINSANY ['audit', 'temp'];
+SELECT * FROM schema_diff WHERE extra_functions CONTAINSNONE ['fn::test'];
 
 -- ─── Comments ───
 -- Line comment
@@ -64,33 +60,30 @@ SELECT * FROM user WHERE tags CONTAINSNONE ['banned'];
   Multi-line
   block comment
 */
-/* Nested comments are not supported */
--- inline comments inside statements are not supported
-SELECT * FROM user;
+SELECT * FROM project;
 
 -- ─── Complex nesting ───
 SELECT * FROM (
 	SELECT * FROM (
-		SELECT name FROM user WHERE age > 18
+		SELECT name FROM agent WHERE active = true
 	) WHERE name != 'test'
 );
 
 -- ─── Object literals ───
-CREATE config SET
-	database = {
-		host: 'localhost',
-		port: 8000,
+CREATE project:config SET
+	settings = {
+		endpoint: 'ws://localhost:8000',
 		options: {
-			strict: true,
+			verify: true,
 			timeout: 30s
 		}
 	},
-	features = ['auth', 'graphql', 'live'];
+	tags = ['production', 'monitored'];
 
 -- ─── Array operations ───
-SELECT * FROM user WHERE 'admin' IN tags;
+SELECT * FROM agent WHERE 'deployer' IN role;
 SELECT * FROM [1, 2, 3, 4, 5];
-SELECT * FROM user WHERE age IN [18, 21, 30, 40, 50];
+SELECT * FROM migration WHERE version IN [1, 2, 3];
 
 -- ─── Parameters in various positions ───
 SELECT $fields FROM $table WHERE $condition LIMIT $limit;

@@ -1,92 +1,30 @@
 -- ═══════════════════════════════════════════════════════════
--- Functions — custom & built-in
+-- Functions — overrealdb platform
 -- ═══════════════════════════════════════════════════════════
 
--- Custom functions
-DEFINE FUNCTION fn::greet($name: string) -> string {
-	RETURN 'Hello, ' + $name + '!';
-};
-
-DEFINE FUNCTION fn::add($a: int, $b: int) -> int {
-	RETURN $a + $b;
-};
-
-DEFINE FUNCTION fn::user::create($name: string, $email: string) -> object {
-	LET $user = CREATE user SET name = $name, email = $email;
-	RETURN $user;
-};
-
-DEFINE FUNCTION fn::user::by_age($min: int, $max: int) -> array {
-	RETURN SELECT * FROM user WHERE age >= $min AND age <= $max;
-};
-
-DEFINE FUNCTION fn::post::publish(   $title: string, $body: string, $author: record<user>) -> object {
-	LET $post = CREATE post SET title = $title, body = $body;
-	RELATE $author->wrote->$post SET published_at = time::now();
-	RETURN $post;
-};
-
--- Calling custom functions
-LET $greeting = fn::greet('World');
-LET $sum = fn::add(40, 2);
-LET $new_user = fn::user::create('Dave', 'dave@example.com');
+-- Call user-defined functions
+RETURN fn::agent::by_role('deployer');
+RETURN fn::project::summary(project:surql_parser);
+RETURN fn::deployment::history(project:surql_parser);
 
 -- Built-in string functions
-SELECT
-	string::len(name) AS name_length,
-	string::uppercase(name) AS upper_name,
-	string::lowercase(email) AS lower_email,
-	string::trim(bio) AS clean_bio,
-	string::slug(title) AS slug,
-	string::concat(name, ' (', email, ')') AS display
-FROM user;
-
--- Built-in math functions
-SELECT
-	math::sqrt(x * x + y * y) AS distance,
-	math::round(price * 1.1, 2) AS with_tax,
-	math::mean(scores) AS average,
-	math::sum(quantities) AS total
-FROM measurements;
+SELECT string::uppercase(name) AS upper_name FROM agent;
+SELECT string::len(content) AS spec_size FROM spec;
+SELECT string::slug(name) AS slug FROM project;
 
 -- Built-in time functions
-SELECT
-	time::now() AS current,
-	time::floor(created_at, 1h) AS hour_bucket,
-	time::group(created_at, 'day') AS day,
-	time::year(created_at) AS year
-FROM events;
+RETURN time::now();
+SELECT time::group(created_at, 'day') AS day, count() AS deploys
+	FROM deployment
+	GROUP BY day;
+
+-- Built-in math functions
+SELECT math::mean(duration_ms) AS avg_duration FROM sync_event;
+SELECT math::max(version) AS latest FROM migration WHERE project = project:surql_parser;
 
 -- Built-in array functions
-SELECT
-	array::len(tags) AS tag_count,
-	array::distinct(tags) AS unique_tags,
-	array::flatten(nested_array) AS flat,
-	array::union(tags, ['new']) AS merged
-FROM post;
+SELECT array::len(missing_tables) AS count FROM schema_diff WHERE drift_detected = true;
+SELECT array::distinct(->manages->project.name) AS unique_projects FROM agent;
 
--- Type functions
-SELECT
-	type::record('user', id) AS record,
-	type::is_string(name) AS is_str,
-	type::is_number(age) AS is_num
-FROM data;
-
--- Crypto
-SELECT crypto::argon2::generate(password) AS hashed FROM input;
-
--- Random
-SELECT
-	rand::uuid::v4() AS id,
-	rand::string(16) AS token,
-	rand::int(1, 100) AS random_number
-FROM ONLY {};
-
-
--- Count and aggregation
-SELECT
-	count() AS total,
-	count(active = true) AS active_count,
-	math::min(age) AS youngest,
-	math::max(age) AS oldest
-FROM user;
+-- Crypto functions (for checksums)
+SELECT crypto::sha256(content) AS hash FROM spec;

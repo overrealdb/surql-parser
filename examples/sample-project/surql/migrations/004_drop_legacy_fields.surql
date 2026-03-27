@@ -1,12 +1,18 @@
-REMOVE INDEX user_name ON user;
-REMOVE FIELD bio ON user;
-DEFINE FIELD profile ON user TYPE object DEFAULT {  } PERMISSIONS FULL;
-DEFINE FIELD profile.bio ON user TYPE none | string PERMISSIONS FULL;
-DEFINE FIELD profile.avatar ON user TYPE none | string PERMISSIONS FULL;
-DEFINE FIELD profile.website ON user TYPE none | string PERMISSIONS FULL;
-REMOVE FIELD avatar ON user;
-DEFINE FIELD updated_at ON user TYPE datetime DEFAULT time::now() PERMISSIONS FULL;
-DEFINE FIELD updated_at ON post TYPE datetime DEFAULT time::now() PERMISSIONS FULL;
-DEFINE INDEX user_active ON user FIELDS active;
-DEFINE INDEX post_published ON post FIELDS published;
-DEFINE INDEX post_created ON post FIELDS created_at;
+-- Migration 004: Add oversync tracking and analytics
+-- Track sync events, add search indexes for specs.
+
+DEFINE INDEX spec_search ON spec FIELDS content;
+
+-- Analytics: deployment stats per project
+DEFINE FUNCTION fn::stats::project($project_id: record<project>) -> object {
+	LET $total_migrations = SELECT count() AS c FROM migration WHERE project = $project_id GROUP ALL;
+	LET $applied = SELECT count() AS c FROM migration WHERE project = $project_id AND status = 'applied' GROUP ALL;
+	LET $syncs = SELECT count() AS c FROM sync_event WHERE project = $project_id AND success = true GROUP ALL;
+	LET $deployments = SELECT count() AS c FROM deployment WHERE project = $project_id GROUP ALL;
+	RETURN {
+		migrations_total: $total_migrations,
+		migrations_applied: $applied,
+		syncs_successful: $syncs,
+		deployments: $deployments
+	};
+};

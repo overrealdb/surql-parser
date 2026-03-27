@@ -1,19 +1,20 @@
--- Migration 002: Add tags, categories, and indexes
--- Extends the schema with tagging and search support.
+-- Migration 002: Add overshift migration tracking
+-- Seeds initial specs and migration records for the parser project.
 
-DEFINE FIELD tags ON post TYPE array<string> DEFAULT [];
-DEFINE FIELD published ON post TYPE bool DEFAULT false;
-DEFINE FIELD slug ON post TYPE option<string>;
-DEFINE INDEX post_slug ON post FIELDS slug UNIQUE;
+CREATE spec:v1 SET
+	project = project:surql_parser,
+	version = 1,
+	content = 'DEFINE TABLE project SCHEMAFULL; DEFINE TABLE agent SCHEMAFULL;',
+	checksum = 'a1b2c3d4e5f6',
+	status = 'applied',
+	created_by = agent:overseer;
 
-DEFINE TABLE category SCHEMAFULL;
-DEFINE FIELD name ON category TYPE string;
-DEFINE FIELD description ON category TYPE option<string>;
-DEFINE FIELD parent ON category TYPE option<record<category>>;
-DEFINE INDEX cat_name ON category FIELDS name UNIQUE;
-
-DEFINE FIELD category ON post TYPE option<record<category>>;
-
-DEFINE FIELD bio ON user TYPE option<string>;
-DEFINE FIELD avatar ON user TYPE option<string>;
-DEFINE INDEX user_name ON user FIELDS name;
+CREATE migration:v001 SET
+	project = project:surql_parser,
+	version = 1,
+	name = 'bootstrap',
+	content = 'CREATE agent:overseer ...',
+	checksum = 'f6e5d4c3b2a1',
+	status = 'applied',
+	applied_at = time::now(),
+	applied_by = agent:overseer;

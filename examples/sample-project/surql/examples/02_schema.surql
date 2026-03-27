@@ -1,61 +1,31 @@
 -- ═══════════════════════════════════════════════════════════
--- Schema definitions — DEFINE statements
+-- Schema definitions — overrealdb platform DEFINE statements
 -- ═══════════════════════════════════════════════════════════
 
--- Namespace & Database
-DEFINE NAMESPACE production;
-DEFINE DATABASE main;
-USE NS production DB main;
+-- Table with full schema enforcement
+DEFINE TABLE project TYPE NORMAL SCHEMAFULL PERMISSIONS NONE;
 
--- Tables
-DEFINE TABLE user SCHEMAFULL;
-DEFINE TABLE post SCHEMALESS;
-DEFINE TABLE audit SCHEMAFULL DROP;
-DEFINE TABLE article SCHEMAFULL CHANGEFEED 1d INCLUDE ORIGINAL;
+-- Fields with types, defaults, and constraints
+DEFINE FIELD name ON project TYPE string
+	ASSERT string::len($value) >= 2 AND string::len($value) <= 64;
+DEFINE FIELD endpoint ON project TYPE none | string;
+DEFINE FIELD created_at ON project TYPE datetime DEFAULT time::now();
+DEFINE FIELD settings ON project TYPE object DEFAULT {};
+DEFINE FIELD settings.auto_deploy ON project TYPE bool DEFAULT false;
+DEFINE FIELD settings.verify_after_apply ON project TYPE bool DEFAULT true;
 
--- Fields with types
-DEFINE FIELD name ON user TYPE string;
-DEFINE FIELD email ON user TYPE string ASSERT string::is_email($value);
-DEFINE FIELD age ON user TYPE int DEFAULT 0;
-DEFINE FIELD active ON user TYPE bool DEFAULT true;
-DEFINE FIELD created_at ON user TYPE datetime DEFAULT time::now();
-DEFINE FIELD tags ON user TYPE array<string> DEFAULT [];
-DEFINE FIELD settings ON user TYPE object DEFAULT {};
-DEFINE FIELD avatar ON user TYPE option<string>;
-DEFINE FIELD bio ON user TYPE option<object> FLEXIBLE;
-DEFINE FIELD password ON user TYPE string READONLY;
+-- Unique and search indexes
+DEFINE INDEX project_name ON project FIELDS name UNIQUE;
+DEFINE INDEX project_desc ON project FIELDS description;
 
--- Record links
-DEFINE FIELD author ON post TYPE record<user>;
-DEFINE FIELD comments ON post TYPE array<record<comment>>;
-DEFINE FIELD category ON post TYPE record<category> DEFAULT category:general;
+-- Agent with READONLY password
+DEFINE TABLE agent TYPE NORMAL SCHEMAFULL PERMISSIONS NONE;
+DEFINE FIELD name ON agent TYPE string;
+DEFINE FIELD api_key ON agent TYPE string READONLY;
+DEFINE FIELD role ON agent TYPE string
+	ASSERT $value IN ['developer', 'reviewer', 'deployer', 'admin'];
 
--- Indexes
-DEFINE INDEX user_email ON user FIELDS email UNIQUE;
-DEFINE INDEX user_name ON user FIELDS name;
-DEFINE INDEX post_created ON post FIELDS created_at;
-
--- Events
-DEFINE EVENT user_created ON user WHEN $event = 'CREATE' THEN {
-	CREATE audit SET
-		action = 'user_created',
-		target = $after.id,
-		timestamp = time::now();
-};
-
-DEFINE EVENT post_updated ON post WHEN $event = 'UPDATE' THEN {
-	UPDATE $after.id SET updated_at = time::now();
-};
-
--- Analyzers
-DEFINE ANALYZER ascii TOKENIZERS blank, class FILTERS ascii, lowercase;
-
--- Access & Users
-DEFINE USER admin ON DATABASE PASSWORD 'secret123' ROLES OWNER;
-
--- Or Replace (overwrite)
-DEFINE TABLE IF NOT EXISTS user SCHEMAFULL;
-DEFINE FIELD IF NOT EXISTS name ON user TYPE string;
-
--- If Not Exists
-DEFINE TABLE IF NOT EXISTS archive SCHEMALESS;
+-- Changefeed for audit
+DEFINE TABLE migration TYPE NORMAL SCHEMAFULL
+	CHANGEFEED 7d INCLUDE ORIGINAL
+	PERMISSIONS NONE;

@@ -62,14 +62,19 @@ dependencies = ["clippy", "fmt-check", "deny"]
 
 [tasks.coverage]
 clear = true
-description = "Generate code coverage report"
+description = "Generate code coverage report (lcov)"
 command = "cargo"
-args = ["llvm-cov", "--lcov", "--output-path", "lcov.info"]
+args = ["llvm-cov", "--workspace", "--lcov", "--output-path", "lcov.info"]
 
 [tasks.coverage-html]
 description = "Generate HTML coverage report"
 command = "cargo"
-args = ["llvm-cov", "--html"]
+args = ["llvm-cov", "--workspace", "--html", "--output-dir", "coverage-report/html"]
+
+[tasks.coverage-summary]
+description = "Show coverage summary (excluding upstream)"
+command = "cargo"
+args = ["llvm-cov", "--workspace", "--summary-only"]
 
 # ─── CI (what GitHub Actions runs) ───
 
@@ -143,3 +148,10 @@ args = ["publish", "--dry-run"]
 description = "Publish to crates.io"
 command = "cargo"
 args = ["publish"]
+
+# ─── Changelog ───
+
+[tasks.changelog]
+description = "Generate CHANGELOG from git commits"
+command = "git-cliff"
+args = ["-o", "CHANGELOG.md"]

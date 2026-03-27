@@ -1,16 +1,42 @@
-DEFINE TABLE follows TYPE NORMAL SCHEMAFULL PERMISSIONS NONE;
-DEFINE FIELD in ON follows TYPE record<user> PERMISSIONS FULL;
-DEFINE FIELD out ON follows TYPE record<user> PERMISSIONS FULL;
-DEFINE FIELD since ON follows TYPE datetime DEFAULT time::now() PERMISSIONS FULL;
-DEFINE TABLE comment TYPE NORMAL SCHEMAFULL PERMISSIONS NONE;
-DEFINE FIELD text ON comment TYPE string PERMISSIONS FULL;
-DEFINE FIELD author ON comment TYPE record<user> PERMISSIONS FULL;
-DEFINE FIELD post ON comment TYPE record<post> PERMISSIONS FULL;
-DEFINE FIELD created_at ON comment TYPE datetime DEFAULT time::now() PERMISSIONS FULL;
+-- Migration 003: Add relations and events
+-- Agents manage projects, deployments trigger sync events.
+
+-- Agent manages project (graph edge)
+DEFINE TABLE manages TYPE RELATION SCHEMAFULL PERMISSIONS NONE;
+DEFINE FIELD IN ON manages TYPE record<agent>;
+DEFINE FIELD out ON manages TYPE record<project>;
+DEFINE FIELD role ON manages TYPE string COMMENT "owner | maintainer | viewer";
+DEFINE FIELD since ON manages TYPE datetime DEFAULT time::now();
+
+RELATE agent:overseer->manages->project:surql_parser SET role = 'owner';
+RELATE agent:reviewer->manages->project:surql_parser SET role = 'maintainer';
+
+-- Audit log (DROP = auto-delete old records)
 DEFINE TABLE audit TYPE NORMAL DROP SCHEMAFULL PERMISSIONS NONE;
-DEFINE FIELD action ON audit TYPE string PERMISSIONS FULL;
-DEFINE FIELD target ON audit TYPE record PERMISSIONS FULL;
-DEFINE FIELD timestamp ON audit TYPE datetime DEFAULT time::now() PERMISSIONS FULL;
-DEFINE EVENT user_created ON user WHEN $event = 'CREATE' THEN { CREATE audit SET action = 'user_created', target = $after.id, timestamp = time::now() };
-DEFINE EVENT post_published ON post WHEN $event = 'UPDATE' AND $after.published = true AND $before.published = false THEN { CREATE audit SET action = 'post_published', target = $after.id, timestamp = time::now() };
-DEFINE FUNCTION fn::user::feed($`$user_id`: record<user>) -> array { RETURN (SELECT ->follows->user->wrote->post.* AS posts FROM ONLY $user_id FETCH posts.author) } PERMISSIONS FULL;
+DEFINE FIELD action ON audit TYPE string;
+DEFINE FIELD target ON audit TYPE record;
+DEFINE FIELD agent ON audit TYPE NONE | record<agent>;
+DEFINE FIELD details ON audit TYPE NONE | object;
+DEFINE FIELD created_at ON audit TYPE datetime DEFAULT time::now();
+
+-- Events: log deployments and migrations
+DEFINE EVENT deployment_started ON deployment
+	WHEN $event = 'CREATE'
+	THEN {
+		CREATE audit SET
+			action = 'deployment_started',
+			target = $after.id,
+			agent = $after.agent,
+			created_at = time::now();
+	};
+
+DEFINE EVENT migration_applied ON migration
+	WHEN $event = 'UPDATE' AND $after.status = 'applied' AND $before.status = 'pending'
+	THEN {
+		CREATE audit SET
+			action = 'migration_applied',
+			target = $after.id,
+			agent = $after.applied_by,
+			details = { version: $after.version, name: $after.name },
+			created_at = time::now();
+	};

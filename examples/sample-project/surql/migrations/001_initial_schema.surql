@@ -1,20 +1,23 @@
--- Migration 001: Initial schema
--- Creates the core tables for the application.
+-- Migration 001: Bootstrap overrealdb platform
+-- Creates the initial agent and project tables.
 
-DEFINE TABLE user SCHEMAFULL;
-DEFINE FIELD name ON user TYPE string;
-DEFINE FIELD email ON user TYPE string;
-DEFINE FIELD age ON user TYPE int DEFAULT 0;
-DEFINE FIELD active ON user TYPE bool DEFAULT true;
-DEFINE FIELD created_at ON user TYPE datetime DEFAULT time::now();
-DEFINE INDEX user_email ON user FIELDS email UNIQUE;
+CREATE agent:overseer SET
+	name = 'overseer',
+	role = 'deployer',
+	model = 'claude-opus-4-6',
+	active = true,
+	last_seen = time::now();
 
-DEFINE TABLE post SCHEMAFULL;
-DEFINE FIELD title ON post TYPE string;
-DEFINE FIELD body ON post TYPE string;
-DEFINE FIELD author ON post TYPE record<user>;
-DEFINE FIELD created_at ON post TYPE datetime DEFAULT time::now();
+CREATE agent:reviewer SET
+	name = 'reviewer',
+	role = 'reviewer',
+	model = 'claude-sonnet-4-6',
+	active = true;
 
-DEFINE FUNCTION fn::greet($name: string) -> string {
-	RETURN 'Hello, ' + $name + '!';
-};
+CREATE project:surql_parser SET
+	name = 'surql-parser',
+	description = 'Standalone SurrealQL parser for the overrealdb ecosystem',
+	owner = agent:overseer,
+	ns = 'overrealdb',
+	db = 'main',
+	endpoint = 'ws://localhost:8000';
