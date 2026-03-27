@@ -16,3 +16,15 @@ publish = false
 name = "surql-transform"
 release = false
 publish = false
+
+# LSP and MCP depend on new surql-parser API not yet on crates.io.
+# Publish manually after surql-parser is released, then remove these entries.
+[[package]]
+name = "surql-lsp"
+release = false
+publish = false
+
+[[package]]
+name = "surql-mcp"
+release = false
+publish = false
