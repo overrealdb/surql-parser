@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.4](https://github.com/overrealdb/surql-parser/compare/surql-parser-v0.1.3...surql-parser-v0.1.4) - 2026-03-27
+
+### Other
+
+- re-enable surql-lsp and surql-mcp in release-plz
+
 ## [0.1.3](https://github.com/overrealdb/surql-parser/compare/surql-parser-v0.1.2...surql-parser-v0.1.3) - 2026-03-27
 
 ### Added
