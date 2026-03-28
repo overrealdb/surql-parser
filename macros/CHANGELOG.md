@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.2](https://github.com/overrealdb/surql-parser/compare/surql-macros-v0.1.1...surql-macros-v0.1.2) - 2026-03-28
+
+### Added
+
+- *(macros)* add mode = "query" to #[surql_function] for auto-generated bodies
+
 ## [0.1.1](https://github.com/overrealdb/surql-parser/compare/surql-macros-v0.1.0...surql-macros-v0.1.1) - 2026-03-27
 
 ### Added
