@@ -1,0 +1,6 @@
+error: type mismatch for fn::greet parameter $name: SurrealQL type is `string` but Rust type is `i64`
+         expected Rust types for `string`: &str, String, &String, Cow<str>, Cow<'_, str>
+ --> tests/schema_ui/fail_function_query_mode_type_mismatch.rs:4:12
+  |
+4 | fn q_greet(_name: i64) -> &'static str {
+  |            ^^^^^

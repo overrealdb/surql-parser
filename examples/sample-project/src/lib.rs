@@ -95,3 +95,21 @@ pub fn agent_by_role(role: &str) -> String {
 pub fn sync_record(project_id: &str, action: &str) -> String {
 	format!("fn::sync::record({project_id}, '{action}', 0, 0, true)")
 }
+
+// ─── mode = "query": auto-generated function bodies from schema ───
+// The macro reads DEFINE FUNCTION params and generates "RETURN fn::name($p1, $p2, ...)"
+
+#[surql_function("fn::agent::by_role", schema = "surql/", mode = "query")]
+pub fn q_agent_by_role(_role: &str) -> &'static str {
+	unreachable!()
+}
+
+#[surql_function("fn::migration::apply", schema = "surql/", mode = "query")]
+pub fn q_migration_apply(_mig_id: &str, _agent_id: &str) -> &'static str {
+	unreachable!()
+}
+
+#[surql_function("fn::deployment::history", schema = "surql/", mode = "query")]
+pub fn q_deployment_history(_project_id: &str) -> &'static str {
+	unreachable!()
+}
