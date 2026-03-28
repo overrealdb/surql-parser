@@ -84,6 +84,26 @@ fn constant_matches_wrapper_project_summary() {
 	assert!(call.starts_with(FN_PROJECT_SUMMARY));
 }
 
+// ─── mode = "query": auto-generated function bodies ───
+
+#[test]
+fn query_mode_agent_by_role_generates_return_statement() {
+	let query = q_agent_by_role("");
+	assert_eq!(query, "RETURN fn::agent::by_role($role)");
+}
+
+#[test]
+fn query_mode_migration_apply_uses_schema_param_names() {
+	let query = q_migration_apply("", "");
+	assert_eq!(query, "RETURN fn::migration::apply($mig_id, $agent_id)");
+}
+
+#[test]
+fn query_mode_deployment_history_single_param() {
+	let query = q_deployment_history("");
+	assert_eq!(query, "RETURN fn::deployment::history($project_id)");
+}
+
 // ─── Negative: build helper runtime failures ───
 
 fn create_temp_schema(dir: &Path, filename: &str, content: &str) {

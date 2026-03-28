@@ -289,7 +289,16 @@ impl syn::parse::Parse for SurqlQueryInput {
 /// 4. Compares Rust function parameter count with SurrealQL parameter count
 /// 5. Checks that each Rust parameter type is compatible with the SurrealQL type
 ///
-/// The annotated function is preserved as-is (the macro only adds a doc comment).
+/// ## Query mode
+///
+/// When `mode = "query"` is provided alongside `schema`, the macro generates the
+/// function body automatically. The function must have no body (just a trailing
+/// semicolon). The generated body returns a `&'static str` containing
+/// `RETURN fn::name($param1, $param2, ...)` where parameter names come from
+/// the DEFINE FUNCTION in the schema (not from the Rust parameter names).
+///
+/// The Rust parameters are kept for compile-time type checking but are unused
+/// at runtime.
 ///
 /// # Examples
 ///
@@ -315,6 +324,31 @@ pub fn surql_function(attr: TokenStream, item: TokenStream) -> TokenStream {
 	let fn_name = &parsed_attr.name;
 	let name = fn_name.value();
 
+	// Validate mode value if provided
+	let is_query_mode = match parsed_attr.mode {
+		Some(ref mode_lit) => {
+			let mode_val = mode_lit.value();
+			if mode_val != "query" {
+				let msg = format!("unsupported mode '{mode_val}', expected 'query'");
+				return syn::Error::new(mode_lit.span(), msg)
+					.to_compile_error()
+					.into();
+			}
+			true
+		}
+		None => false,
+	};
+
+	// mode = "query" requires schema
+	if is_query_mode && parsed_attr.schema.is_none() {
+		return syn::Error::new(
+			fn_name.span(),
+			"mode = \"query\" requires schema = \"path/\" to be specified",
+		)
+		.to_compile_error()
+		.into();
+	}
+
 	// Must start with fn::
 	if !name.starts_with("fn::") {
 		return syn::Error::new(fn_name.span(), "surql_function name must start with 'fn::'")
@@ -337,6 +371,9 @@ pub fn surql_function(attr: TokenStream, item: TokenStream) -> TokenStream {
 		Ok(f) => f,
 		Err(e) => return e.to_compile_error().into(),
 	};
+
+	// Track generated query string for mode = "query"
+	let mut generated_query: Option<String> = None;
 
 	// If schema path provided, validate parameter count and types against DEFINE FUNCTION
 	if let Some(ref schema_lit) = parsed_attr.schema {
@@ -393,7 +430,6 @@ pub fn surql_function(attr: TokenStream, item: TokenStream) -> TokenStream {
 							 \x20 expected Rust types for `{surql_type}`: {hint}",
 							surql_param.name
 						);
-						// Point to the specific parameter in the Rust function
 						let span = rust_fn
 							.sig
 							.inputs
@@ -411,8 +447,17 @@ pub fn surql_function(attr: TokenStream, item: TokenStream) -> TokenStream {
 						return syn::Error::new(span, msg).to_compile_error().into();
 					}
 
-					// If param names differ, note it (not an error, just informational)
 					let _ = rust_name;
+				}
+
+				// Build the query string for mode = "query"
+				if is_query_mode {
+					let param_list = surql_params
+						.iter()
+						.map(|p| format!("${}", p.name))
+						.collect::<Vec<_>>()
+						.join(", ");
+					generated_query = Some(format!("RETURN {name}({param_list})"));
 				}
 			}
 			Ok(None) => {
@@ -430,6 +475,24 @@ pub fn surql_function(attr: TokenStream, item: TokenStream) -> TokenStream {
 					.into();
 			}
 		}
+	}
+
+	// mode = "query": generate the function body
+	if let Some(query_str) = generated_query {
+		let vis = &rust_fn.vis;
+		let sig = &rust_fn.sig;
+		let attrs = &rust_fn.attrs;
+		let doc = format!(" SurrealQL function: `{name}`");
+		let query_doc = format!(" Generated query: `{query_str}`");
+		return quote! {
+			#(#attrs)*
+			#[doc = #doc]
+			#[doc = #query_doc]
+			#vis #sig {
+				#query_str
+			}
+		}
+		.into();
 	}
 
 	// Return the function as-is with a doc attribute
@@ -451,32 +514,40 @@ fn count_fn_params(func: &syn::ItemFn) -> usize {
 		.count()
 }
 
-/// Parsed attribute for `#[surql_function("fn::name", schema = "path/")]`.
+/// Parsed attribute for `#[surql_function("fn::name", schema = "path/", mode = "query")]`.
 struct SurqlFunctionAttr {
 	name: LitStr,
 	schema: Option<LitStr>,
+	mode: Option<LitStr>,
 }
 
 impl syn::parse::Parse for SurqlFunctionAttr {
 	fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
 		let name: LitStr = input.parse()?;
 		let mut schema = None;
+		let mut mode = None;
 
-		if input.peek(Token![,]) {
+		while input.peek(Token![,]) {
 			let _: Token![,] = input.parse()?;
-			if !input.is_empty() {
-				let key: syn::Ident = input.parse()?;
-				if key != "schema" {
-					return Err(syn::Error::new(
-						key.span(),
-						format!("unexpected attribute '{key}', expected 'schema'"),
-					));
-				}
-				let _: Token![=] = input.parse()?;
+			if input.is_empty() {
+				break;
+			}
+
+			let key: syn::Ident = input.parse()?;
+			let _: Token![=] = input.parse()?;
+
+			if key == "schema" {
 				schema = Some(input.parse()?);
+			} else if key == "mode" {
+				mode = Some(input.parse()?);
+			} else {
+				return Err(syn::Error::new(
+					key.span(),
+					format!("unexpected attribute '{key}', expected 'schema' or 'mode'"),
+				));
 			}
 		}
 
-		Ok(SurqlFunctionAttr { name, schema })
+		Ok(SurqlFunctionAttr { name, schema, mode })
 	}
 }

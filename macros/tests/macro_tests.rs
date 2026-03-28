@@ -56,7 +56,9 @@ fn schema_validation_tests() {
 	t.pass("tests/schema_ui/pass_function_schema_match.rs");
 	t.pass("tests/schema_ui/pass_function_type_match.rs");
 	t.pass("tests/schema_ui/pass_query_schema_match.rs");
+	t.pass("tests/schema_ui/pass_function_query_mode.rs");
 	t.compile_fail("tests/schema_ui/fail_function_arity_mismatch.rs");
 	t.compile_fail("tests/schema_ui/fail_function_type_mismatch.rs");
 	t.compile_fail("tests/schema_ui/fail_query_type_mismatch.rs");
+	t.compile_fail("tests/schema_ui/fail_function_query_mode_type_mismatch.rs");
 }
