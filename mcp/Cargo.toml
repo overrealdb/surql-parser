@@ -18,7 +18,7 @@ name = "surql-mcp"
 path = "src/main.rs"
 
 [dependencies]
-rmcp = { version = "0.16", features = ["server", "macros", "schemars", "transport-io"] }
+rmcp = { version = "1.3", features = ["server", "macros", "schemars", "transport-io"] }
 surrealdb = { version = "3", default-features = false, features = ["kv-mem"] }
 overshift = { path = "../overshift", version = "0.2", default-features = false }
 surql-parser = { path = "..", version = "0.1" }
