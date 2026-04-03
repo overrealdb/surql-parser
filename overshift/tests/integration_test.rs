@@ -63,10 +63,10 @@ fn full_plan_and_apply() {
 		assert_eq!(result.applied_migrations, 2);
 		assert_eq!(result.applied_modules, 2);
 
-		// Second plan: nothing pending
+		// Second plan: nothing pending, schema checksums match so skipped
 		let plan2 = overshift::plan(&db, &manifest).await.unwrap();
 		assert!(plan2.pending_migrations.is_empty());
-		assert_eq!(plan2.schema_modules.len(), 2);
+		assert!(plan2.schema_modules.is_empty());
 	});
 }
 
@@ -81,12 +81,13 @@ fn idempotent_apply() {
 		let result = plan.apply(&db).await.unwrap();
 		assert_eq!(result.applied_migrations, 2);
 
-		// Second apply — only schema re-applied
+		// Second apply — schema unchanged, skipped
 		let plan = overshift::plan(&db, &manifest).await.unwrap();
 		assert!(plan.pending_migrations.is_empty());
+		assert!(plan.schema_modules.is_empty());
 		let result = plan.apply(&db).await.unwrap();
 		assert_eq!(result.applied_migrations, 0);
-		assert_eq!(result.applied_modules, 2);
+		assert_eq!(result.applied_modules, 0);
 	});
 }
 
@@ -102,10 +103,11 @@ fn triple_apply_still_idempotent() {
 			let result = plan.apply(&db).await.unwrap();
 			if i == 0 {
 				assert_eq!(result.applied_migrations, 2);
+				assert_eq!(result.applied_modules, 2);
 			} else {
 				assert_eq!(result.applied_migrations, 0);
+				assert_eq!(result.applied_modules, 0);
 			}
-			assert_eq!(result.applied_modules, 2);
 		}
 	});
 }
@@ -153,11 +155,9 @@ fn plan_is_empty_when_nothing_to_do() {
 
 		plan.apply(&db).await.unwrap();
 
-		// After apply, only schema remains (always re-applied)
+		// After apply, schema checksums match — plan is empty
 		let plan2 = overshift::plan(&db, &manifest).await.unwrap();
-		// pending_migrations is empty, but schema_modules is not
-		assert!(plan2.pending_migrations.is_empty());
-		assert!(!plan2.schema_modules.is_empty());
+		assert!(plan2.is_empty());
 	});
 }
 
@@ -207,7 +207,7 @@ fn changelog_grows_on_reapply() {
 		let plan = overshift::plan(&db, &manifest).await.unwrap();
 		plan.apply(&db).await.unwrap();
 
-		// Second apply (only schema)
+		// Second apply — schema unchanged, skipped entirely
 		let plan = overshift::plan(&db, &manifest).await.unwrap();
 		plan.apply(&db).await.unwrap();
 
@@ -219,8 +219,8 @@ fn changelog_grows_on_reapply() {
 		let mut response = db.query("SELECT * FROM changelog").await.unwrap();
 		let rows: Vec<serde_json::Value> = response.take(0).unwrap();
 
-		// 4 from first apply + 2 schema from second apply = 6
-		assert_eq!(rows.len(), 6);
+		// 4 from first apply, nothing from second (schema skipped)
+		assert_eq!(rows.len(), 4);
 	});
 }
 
@@ -740,6 +740,86 @@ fn should_reject_duplicate_in_plan() {
 		assert!(
 			err.contains("checksum mismatch"),
 			"expected checksum mismatch error, got: {err}"
+		);
+	});
+}
+
+// ─── Schema checksum skip ───
+
+#[test]
+fn schema_reapplied_when_content_changes() {
+	let rt = runtime();
+	let db = connect();
+
+	let tmp = tempfile::tempdir().unwrap();
+	let mod_dir = tmp.path().join("schema/core");
+	std::fs::create_dir_all(&mod_dir).unwrap();
+	std::fs::write(
+		mod_dir.join("table.surql"),
+		"DEFINE TABLE OVERWRITE item SCHEMAFULL;",
+	)
+	.unwrap();
+	std::fs::write(
+		tmp.path().join("manifest.toml"),
+		r#"
+		[meta]
+		ns = "test_schema_reapply"
+		db = "main"
+		system_db = "_system"
+
+		[[modules]]
+		name = "core"
+		path = "schema/core"
+	"#,
+	)
+	.unwrap();
+
+	let manifest = Manifest::load(tmp.path()).unwrap();
+
+	rt.block_on(async {
+		// First apply
+		let plan = overshift::plan(&db, &manifest).await.unwrap();
+		let r1 = plan.apply(&db).await.unwrap();
+		assert_eq!(r1.applied_modules, 1);
+
+		// Modify schema file
+		std::fs::write(
+			mod_dir.join("table.surql"),
+			"DEFINE TABLE OVERWRITE item SCHEMAFULL;\nDEFINE FIELD OVERWRITE name ON item TYPE string;",
+		)
+		.unwrap();
+
+		// Second plan — content changed, should re-apply
+		let plan2 = overshift::plan(&db, &manifest).await.unwrap();
+		assert_eq!(
+			plan2.schema_modules.len(),
+			1,
+			"expected schema module to be re-applied after content change"
+		);
+		let r2 = plan2.apply(&db).await.unwrap();
+		assert_eq!(r2.applied_modules, 1);
+	});
+}
+
+#[test]
+fn plan_is_empty_after_full_apply() {
+	let rt = runtime();
+	let db = connect();
+	let manifest = test_manifest("plan_empty_after_apply");
+
+	rt.block_on(async {
+		let plan = overshift::plan(&db, &manifest).await.unwrap();
+		assert!(!plan.is_empty());
+
+		plan.apply(&db).await.unwrap();
+
+		// After apply with unchanged schema, plan should be empty
+		let plan2 = overshift::plan(&db, &manifest).await.unwrap();
+		assert!(
+			plan2.is_empty(),
+			"expected plan to be empty after full apply, got {} migrations + {} modules",
+			plan2.pending_migrations.len(),
+			plan2.schema_modules.len()
 		);
 	});
 }

@@ -290,7 +290,14 @@ async fn apply_inner(
 	let mut applied_modules = 0;
 
 	for module in &plan.schema_modules {
-		info!(name = %module.name, "applying schema module");
+		info!(
+			name = %module.name,
+			files = module.files.len(),
+			bytes = module.content.len(),
+			"applying schema module"
+		);
+
+		let start = std::time::Instant::now();
 
 		let response = db
 			.query(&module.content)
@@ -303,7 +310,11 @@ async fn apply_inner(
 
 		applied_modules += 1;
 
-		info!(name = %module.name, "schema module applied");
+		info!(
+			name = %module.name,
+			elapsed_s = start.elapsed().as_secs_f64(),
+			"schema module applied"
+		);
 	}
 
 	// Record schema changelog entries
@@ -500,6 +511,35 @@ pub async fn plan(db: &Surreal<Any>, manifest: &Manifest) -> crate::Result<Plan>
 		.into_iter()
 		.filter(|m| !applied_versions.contains(&m.version))
 		.collect();
+
+	// 6. Skip schema modules if all checksums match previous apply
+	let schema_modules = if schema_modules.is_empty() {
+		schema_modules
+	} else {
+		match changelog::read_schema_checksums(db).await {
+			Ok(recorded) => {
+				let all_match = recorded.len() >= schema_modules.len()
+					&& schema_modules.iter().all(|m| {
+						let current = compute_checksum(&m.content);
+						recorded.get(&m.name).is_some_and(|prev| *prev == current)
+					});
+
+				if all_match {
+					info!(
+						modules = schema_modules.len(),
+						"schema modules unchanged — skipping apply"
+					);
+					Vec::new()
+				} else {
+					schema_modules
+				}
+			}
+			Err(e) => {
+				tracing::warn!("failed to read schema checksums, will re-apply: {e}");
+				schema_modules
+			}
+		}
+	};
 
 	Ok(Plan {
 		meta: manifest.meta.clone(),
