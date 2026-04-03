@@ -29,6 +29,9 @@ enum Command {
 		/// Dry-run mode (same as `plan`).
 		#[arg(long)]
 		dry_run: bool,
+		/// Skip schema module application (use when schema is already applied).
+		#[arg(long, env = "OVERSHIFT_SKIP_SCHEMA")]
+		skip_schema: bool,
 		/// Only verify schema matches between shadow DB and target (no apply).
 		#[cfg(feature = "shadow")]
 		#[arg(long)]
@@ -68,6 +71,7 @@ async fn main() -> anyhow::Result<()> {
 			path,
 			url,
 			dry_run,
+			skip_schema,
 			#[cfg(feature = "shadow")]
 			verify_only,
 		} => {
@@ -101,7 +105,15 @@ async fn main() -> anyhow::Result<()> {
 			}
 
 			let db = any::connect(&url).await?;
-			let plan = overshift::plan(&db, &manifest).await?;
+			let mut plan = overshift::plan(&db, &manifest).await?;
+
+			if skip_schema && !plan.schema_modules.is_empty() {
+				println!(
+					"Skipping {} schema modules (--skip-schema)",
+					plan.schema_modules.len()
+				);
+				plan.schema_modules.clear();
+			}
 
 			if dry_run {
 				plan.print();
